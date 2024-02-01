@@ -51,7 +51,9 @@ void NativeRender::RenderVideoFrame(NativeImage *pImage)
     ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr);
     uint8_t *dstBuffer = static_cast<uint8_t *>(m_NativeWindowBuffer.bits);
 
+    // 计算源图像每行的字节数
     int srcLineSize = pImage->width * 4;//RGBA
+    // 目标缓冲区每行的字节数则由 m_NativeWindowBuffer.stride 决定，乘以 4 是因为每个像素占用 4 个字节。
     int dstLineSize = m_NativeWindowBuffer.stride * 4;
 
     for (int i = 0; i < m_DstHeight; ++i) {

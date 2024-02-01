@@ -21,6 +21,10 @@ public:
     NativeRender(JNIEnv *env, jobject surface);
     virtual ~NativeRender();
     virtual void Init(int videoWidth, int videoHeight, int *dstSize);
+    /**
+     * 虚函数
+     * @param pImage
+     */
     virtual void RenderVideoFrame(NativeImage *pImage);
     virtual void UnInit();
 

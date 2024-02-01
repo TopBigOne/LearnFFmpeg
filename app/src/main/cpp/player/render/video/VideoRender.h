@@ -18,6 +18,10 @@ public:
     }
     virtual ~VideoRender(){}
     virtual void Init(int videoWidth, int videoHeight, int *dstSize) = 0;
+    /**
+     * 纯虚函数
+     * @param pImage
+     */
     virtual void RenderVideoFrame(NativeImage *pImage) = 0;
     virtual void UnInit() = 0;
 
