@@ -469,25 +469,22 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
 
     @Override
     public void onClick(View v) {
-        switch (v.getId()) {
-            case R.id.switch_camera_btn:
-                String cameraId = mCamera2Wrapper.getCameraId();
-                String[] cameraIds = mCamera2Wrapper.getSupportCameraIds();
-                if (cameraIds != null) {
-                    for (int i = 0; i < cameraIds.length; i++) {
-                        if (!cameraIds[i].equals(cameraId)) {
-                            mCamera2Wrapper.updateCameraId(cameraIds[i]);
-                            updateTransformMatrix(cameraIds[i]);
-                            updateGLSurfaceViewSize(mCamera2Wrapper.getPreviewSize());
-                            break;
-                        }
+        int id = v.getId();
+        if (id == R.id.switch_camera_btn) {
+            String cameraId = mCamera2Wrapper.getCameraId();
+            String[] cameraIds = mCamera2Wrapper.getSupportCameraIds();
+            if (cameraIds != null) {
+                for (int i = 0; i < cameraIds.length; i++) {
+                    if (!cameraIds[i].equals(cameraId)) {
+                        mCamera2Wrapper.updateCameraId(cameraIds[i]);
+                        updateTransformMatrix(cameraIds[i]);
+                        updateGLSurfaceViewSize(mCamera2Wrapper.getPreviewSize());
+                        break;
                     }
                 }
-                break;
-            case R.id.switch_ratio_btn:
-                showChangeSizeDialog();
-                break;
-                default:
+            }
+        } else if (id == R.id.switch_ratio_btn) {
+            showChangeSizeDialog();
         }
     }
 
