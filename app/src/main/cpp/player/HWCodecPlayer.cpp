@@ -8,6 +8,10 @@
 
 #include "HWCodecPlayer.h"
 
+/**
+ * @brief FFmpeg日志回调函数
+ * 将FFmpeg的日志重定向到Android Logcat
+ */
 void av_log_callback(void*ptr, int level, const char* fmt, va_list vl) {
     va_list vl2;
     char line[1024] = {0};
@@ -18,33 +22,56 @@ void av_log_callback(void*ptr, int level, const char* fmt, va_list vl) {
     LOGCATI("FFMPEG: %s", line);
 }
 
+/**
+ * @brief 初始化硬件解码播放器
+ * @param jniEnv JNI环境指针
+ * @param obj Java对象
+ * @param url 媒体文件路径
+ * @param videoRenderType 视频渲染类型（本类中未使用）
+ * @param surface Android Surface对象，用于视频渲染
+ */
 void HWCodecPlayer::Init(JNIEnv *jniEnv, jobject obj, char *url, int videoRenderType, jobject surface) {
     LOGCATE("HWCodecPlayer::Init");
+    // 设置FFmpeg日志级别和回调
     av_log_set_level(AV_LOG_DEBUG);
     av_log_set_callback(av_log_callback);
+
+    // 保存媒体文件路径
     strcpy(m_Url,url);
+
+    // 从Surface创建NativeWindow用于视频渲染
     m_ANativeWindow = ANativeWindow_fromSurface(jniEnv, surface);
 
+    // 创建音视频数据包队列
     m_VideoPacketQueue = new AVPacketQueue();
     m_AudioPacketQueue = new AVPacketQueue();
 
+    // 启动队列
     m_VideoPacketQueue->Start();
     m_AudioPacketQueue->Start();
 
+    // 保存JNI相关对象
     jniEnv->GetJavaVM(&m_JavaVM);
     m_JavaObj = jniEnv->NewGlobalRef(obj);
 
 }
 
+/**
+ * @brief 释放播放器资源
+ */
 void HWCodecPlayer::UnInit() {
     LOGCATE("HWCodecPlayer::UnInit");
+    // 先停止播放
     Stop();
+
+    // 等待解封装线程结束
     if(m_DeMuxThread) {
         m_DeMuxThread->join();
         delete m_DeMuxThread;
         m_DeMuxThread = nullptr;
     }
 
+    // 释放数据包队列
     if(m_VideoPacketQueue) {
         delete m_VideoPacketQueue;
         m_VideoPacketQueue = nullptr;
@@ -55,10 +82,12 @@ void HWCodecPlayer::UnInit() {
         m_AudioPacketQueue = nullptr;
     }
 
+    // 释放NativeWindow
     if(m_ANativeWindow) {
         ANativeWindow_release(m_ANativeWindow);
     }
 
+    // 删除JNI全局引用
     bool isAttach = false;
     JNIEnv *env = GetJNIEnv(&isAttach);
     env->DeleteGlobalRef(m_JavaObj);
@@ -69,30 +98,45 @@ void HWCodecPlayer::UnInit() {
 
 }
 
+/**
+ * @brief 开始播放
+ */
 void HWCodecPlayer::Play() {
     LOGCATE("HWCodecPlayer::Play");
     if(m_DeMuxThread == nullptr) {
+        // 首次播放，创建解封装线程
         m_DeMuxThread = new thread(DeMuxThreadProc, this);
     } else {
+        // 从暂停恢复播放
         std::unique_lock<std::mutex> lock(m_Mutex);
         m_PlayerState = PLAYER_STATE_PLAYING;
-        m_Cond.notify_all();
+        m_Cond.notify_all();  // 唤醒所有等待的线程
     }
 }
 
+/**
+ * @brief 暂停播放
+ */
 void HWCodecPlayer::Pause() {
     LOGCATE("HWCodecPlayer::Pause");
     std::unique_lock<std::mutex> lock(m_Mutex);
     m_PlayerState = PLAYER_STATE_PAUSE;
 }
 
+/**
+ * @brief 停止播放
+ */
 void HWCodecPlayer::Stop() {
     LOGCATE("HWCodecPlayer::Stop");
     std::unique_lock<std::mutex> lock(m_Mutex);
     m_PlayerState = PLAYER_STATE_STOP;
-    m_Cond.notify_all();
+    m_Cond.notify_all();  // 唤醒所有等待的线程
 }
 
+/**
+ * @brief 跳转到指定位置
+ * @param position 跳转位置（0.0-1.0之间的浮点数）
+ */
 void HWCodecPlayer::SeekToPosition(float position) {
     LOGCATE("HWCodecPlayer::SeekToPosition position=%f", position);
     std::unique_lock<std::mutex> lock(m_Mutex);
@@ -101,6 +145,11 @@ void HWCodecPlayer::SeekToPosition(float position) {
     m_Cond.notify_all();
 }
 
+/**
+ * @brief 获取媒体参数
+ * @param paramType 参数类型
+ * @return 参数值
+ */
 long HWCodecPlayer::GetMediaParams(int paramType) {
     LOGCATE("HWCodecPlayer::GetMediaParams paramType=%d", paramType);
     long value = 0;
@@ -113,12 +162,17 @@ long HWCodecPlayer::GetMediaParams(int paramType) {
             value = m_VideoCodecCtx != nullptr ? m_VideoCodecCtx->height : 0;
             break;
         case MEDIA_PARAM_VIDEO_DURATION:
-            value = m_Duration * 1.0f / 1000;//ms to s
+            value = m_Duration * 1.0f / 1000;  // 毫秒转秒
             break;
     }
     return value;
 }
 
+/**
+ * @brief 获取JNI环境指针
+ * @param isAttach 输出参数，指示当前线程是否被附加到JVM
+ * @return JNI环境指针
+ */
 JNIEnv *HWCodecPlayer::GetJNIEnv(bool *isAttach) {
     JNIEnv *env;
     int status;
@@ -127,8 +181,10 @@ JNIEnv *HWCodecPlayer::GetJNIEnv(bool *isAttach) {
         return nullptr;
     }
     *isAttach = false;
+    // 尝试获取当前线程的JNI环境
     status = m_JavaVM->GetEnv((void **)&env, JNI_VERSION_1_4);
     if (status != JNI_OK) {
+        // 如果当前线程未附加到JVM，则附加它
         status = m_JavaVM->AttachCurrentThread(&env, nullptr);
         if (status != JNI_OK) {
             LOGCATE("HWCodecPlayer::GetJNIEnv failed to attach current thread");
@@ -147,6 +203,12 @@ JavaVM *HWCodecPlayer::GetJavaVM() {
     return m_JavaVM;
 }
 
+/**
+ * @brief 向Java层发送消息
+ * @param context 上下文对象（HWCodecPlayer实例指针）
+ * @param msgType 消息类型
+ * @param msgCode 消息代码
+ */
 void HWCodecPlayer::PostMessage(void *context, int msgType, float msgCode) {
     if(context != nullptr)
     {
@@ -165,17 +227,41 @@ void HWCodecPlayer::PostMessage(void *context, int msgType, float msgCode) {
     }
 }
 
+/**
+ * @brief 解封装线程入口函数
+ * @param player HWCodecPlayer实例指针
+ *
+ * 线程执行流程：
+ * 1. 初始化解码器（打开媒体文件、创建解码器等）
+ * 2. 执行解封装循环（读取数据包并分发）
+ * 3. 释放解码器资源
+ * 4. 通知Java层解码完成
+ */
 void HWCodecPlayer::DeMuxThreadProc(HWCodecPlayer *player) {
     LOGCATE("HWCodecPlayer::DeMuxThreadProc start");
     do {
+        // 初始化解码器
         if(player->InitDecoder() != 0) break;
+        // 执行解封装循环
         player->DoMuxLoop();
     } while (false);
+    // 释放解码器资源
     player->UnInitDecoder();
+    // 通知Java层解码完成
     player->PostMessage(player, MSG_DECODER_DONE, 0);
     LOGCATE("HWCodecPlayer::DeMuxThreadProc end");
 }
 
+/**
+ * @brief 解封装循环
+ * @return 0成功
+ *
+ * 主要功能：
+ * 1. 从媒体文件中读取音视频数据包(AVPacket)
+ * 2. 将数据包分发到对应的队列（视频队列或音频队列）
+ * 3. 处理暂停/停止/Seek等控制逻辑
+ * 4. 控制缓冲区大小，防止缓冲过多数据
+ */
 int HWCodecPlayer::DoMuxLoop() {
     LOGCATE("HWCodecPlayer::DoMuxLoop start");
     {
@@ -186,24 +272,28 @@ int HWCodecPlayer::DoMuxLoop() {
     int result = 0;
     AVPacket avPacket = {0};
     for(;;) {
+        // 处理暂停状态
         double passTimes = 0;
         while (m_PlayerState == PLAYER_STATE_PAUSE) {
             double lastSysTime = GetSysCurrentTime();
             std::unique_lock<std::mutex> lock(m_Mutex);
             LOGCATE("HWCodecPlayer::DoMuxLoop waiting .......");
             m_Cond.wait_for(lock, std::chrono::milliseconds(10));
+            // 计算暂停时间，调整时间基准
             passTimes = GetSysCurrentTime() - lastSysTime;
             m_CommonStartBase += passTimes;
         }
 
+        // 处理停止状态
         if(m_PlayerState == PLAYER_STATE_STOP) {
             break;
         }
 
+        // 处理Seek请求
         if(m_SeekPosition >= 0) {
-            //seek to frame
             LOGCATE("HWCodecPlayer::DoMuxLoop seeking m_SeekPosition=%f", m_SeekPosition);
-            int64_t seek_target = static_cast<int64_t>(m_SeekPosition * 1000000);//微秒
+            // 计算Seek目标时间（转换为微秒）
+            int64_t seek_target = static_cast<int64_t>(m_SeekPosition * 1000000);
             int64_t seek_min = INT64_MIN;
             int64_t seek_max = INT64_MAX;
             int seek_ret = avformat_seek_file(m_AVFormatContext, -1, seek_min, seek_target, seek_max, 0);
@@ -683,38 +773,73 @@ int HWCodecPlayer::UnInitDecoder() {
     return 0;
 }
 
+/**
+ * @brief 音视频同步函数
+ *
+ * 实现视频向音频同步的策略：
+ * 1. 计算视频帧之间的时间间隔delay
+ * 2. 以音频时钟为参考时钟（主时钟）
+ * 3. 计算视频时钟与音频时钟的差值avDiff
+ * 4. 根据avDiff调整视频帧显示延迟
+ *
+ * 同步策略：
+ * - 视频慢于音频（avDiff < -threshold）：减小延迟，加快视频播放
+ * - 视频快于音频（avDiff > threshold）：增大延迟，减慢视频播放
+ * - 差值在阈值内：正常播放
+ */
 void HWCodecPlayer::AVSync() {
     LOGCATE("HWCodecPlayer::AVSync");
+    // 计算两帧之间的时间差
     double delay = m_VideoClock.curPts - m_VideoClock.lastPts;
+
+    // 计算理论帧间隔（根据帧率）
     int tickFrame = 1000 * m_FrameRate.den / m_FrameRate.num;
     LOGCATE("HWCodecPlayer::AVSync tickFrame=%dms", tickFrame);
+
+    // 如果delay异常，使用理论帧间隔
     if(delay <= 0 || delay > VIDEO_FRAME_MAX_DELAY) {
         delay = tickFrame;
     }
-    double refClock = m_AudioClock.GetClock();// 视频向音频同步
+
+    // 获取音频时钟作为参考时钟（视频向音频同步）
+    double refClock = m_AudioClock.GetClock();
+
+    // 计算音视频时钟差值（正值表示视频快于音频，负值表示视频慢于音频）
     double avDiff = m_VideoClock.lastPts - refClock;
     m_VideoClock.lastPts = m_VideoClock.curPts;
+
+    // 计算同步阈值
     double syncThreshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
     LOGCATE("HWCodecPlayer::AVSync refClock=%lf, delay=%lf, avDiff=%lf, syncThreshold=%lf", refClock, delay, avDiff, syncThreshold);
-    if(avDiff <= -syncThreshold) { //视频比音频慢
+
+    // 根据音视频差值调整延迟
+    if(avDiff <= -syncThreshold) {
+        // 视频比音频慢，减小延迟，加快视频播放
         delay = FFMAX(0,  delay + avDiff);
     }
-    else if(avDiff >= syncThreshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) { //视频比音频快太多
+    else if(avDiff >= syncThreshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) {
+        // 视频比音频快太多，增大延迟，减慢视频播放
         delay = delay + avDiff;
     }
-    else if(avDiff >= syncThreshold)
+    else if(avDiff >= syncThreshold) {
+        // 视频稍快于音频，加倍延迟
         delay = 2 * delay;
+    }
 
     LOGCATE("HWCodecPlayer::AVSync avDiff=%lf, delay=%lf", avDiff, delay);
 
+    // 计算实际帧间隔（用于微调）
     double tickCur = GetSysCurrentTime();
-    double tickDiff =  tickCur - m_VideoClock.frameTimer;//两帧实际的时间间隔
+    double tickDiff =  tickCur - m_VideoClock.frameTimer;  // 两帧实际的时间间隔
     m_VideoClock.frameTimer = tickCur;
 
-    if(tickDiff - tickFrame >  5) delay-=5;
-    if(tickDiff - tickFrame < -5) delay+=5;
+    // 根据实际帧间隔进行微调
+    if(tickDiff - tickFrame >  5) delay-=5;   // 实际间隔大于理论间隔，减小延迟
+    if(tickDiff - tickFrame < -5) delay+=5;   // 实际间隔小于理论间隔，增大延迟
 
     LOGCATE("HWCodecPlayer::AVSync delay=%lf, tickDiff=%lf", delay, tickDiff);
+
+    // 休眠指定时间，实现同步
     if(delay > 0) {
         usleep(1000 * delay);
     }

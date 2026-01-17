@@ -104,15 +104,31 @@ static GLfloat textureCoords[] = {
 
 static GLushort indices[] = { 0, 1, 2, 0, 2, 3 };
 
+/**
+ * @brief 构造函数
+ * 初始化GLCameraRender实例
+ */
 GLCameraRender::GLCameraRender():VideoRender(VIDEO_RENDER_OPENGL) {
 
 }
 
+/**
+ * @brief 析构函数
+ * 释放渲染图像资源
+ */
 GLCameraRender::~GLCameraRender() {
     NativeImageUtil::FreeNativeImage(&m_RenderImage);
 
 }
 
+/**
+ * @brief 初始化渲染器
+ * @param videoWidth 视频宽度
+ * @param videoHeight 视频高度
+ * @param dstSize 输出尺寸数组（可选）
+ *
+ * 设置视频尺寸并初始化MVP矩阵
+ */
 void GLCameraRender::Init(int videoWidth, int videoHeight, int *dstSize) {
     LOGCATE("GLCameraRender::InitRender video[w, h]=[%d, %d]", videoWidth, videoHeight);
     if(dstSize != nullptr) {
@@ -123,11 +139,19 @@ void GLCameraRender::Init(int videoWidth, int videoHeight, int *dstSize) {
     UpdateMVPMatrix(0, 0, 1.0f, 1.0f);
 }
 
+/**
+ * @brief 接收视频帧用于渲染
+ * @param pImage 输入的视频帧
+ *
+ * 将输入的视频帧复制到内部缓冲区
+ * 如果尺寸变化，重新分配缓冲区
+ */
 void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
     LOGCATE("GLCameraRender::RenderVideoFrame pImage=%p", pImage);
     if(pImage == nullptr || pImage->ppPlane[0] == nullptr)
         return;
     std::unique_lock<std::mutex> lock(m_Mutex);
+    // 检测尺寸变化，重新分配缓冲区
     if (pImage->width != m_RenderImage.width || pImage->height != m_RenderImage.height) {
         if (m_RenderImage.ppPlane[0] != nullptr) {
             NativeImageUtil::FreeNativeImage(&m_RenderImage);
@@ -143,6 +167,10 @@ void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
     //NativeImageUtil::DumpNativeImage(&m_RenderImage, "/sdcard", "camera");
 }
 
+/**
+ * @brief 反初始化渲染器
+ * 释放扩展图像和着色器缓冲区资源
+ */
 void GLCameraRender::UnInit() {
     NativeImageUtil::FreeNativeImage(&m_ExtImage);
 
@@ -153,6 +181,15 @@ void GLCameraRender::UnInit() {
 
 }
 
+/**
+ * @brief 更新MVP矩阵（简化版本）
+ * @param angleX X轴旋转角度
+ * @param angleY Y轴旋转角度
+ * @param scaleX X轴缩放比例
+ * @param scaleY Y轴缩放比例
+ *
+ * 根据旋转角度和缩放参数计算MVP变换矩阵
+ */
 void GLCameraRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float scaleY)
 {
     angleX = angleX % 360;
@@ -161,19 +198,19 @@ void GLCameraRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float
     //转化为弧度角
     float radiansX = static_cast<float>(MATH_PI / 180.0f * angleX);
     float radiansY = static_cast<float>(MATH_PI / 180.0f * angleY);
-    // Projection matrix
+    // Projection matrix - 投影矩阵（正交投影）
     glm::mat4 Projection = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 100.0f);
     //glm::mat4 Projection = glm::frustum(-ratio, ratio, -1.0f, 1.0f, 4.0f, 100.0f);
     //glm::mat4 Projection = glm::perspective(45.0f,ratio, 0.1f,100.f);
 
-    // View matrix
+    // View matrix - 视图矩阵
     glm::mat4 View = glm::lookAt(
             glm::vec3(0, 0, 4), // Camera is at (0,0,1), in World Space
             glm::vec3(0, 0, 0), // and looks at the origin
             glm::vec3(0, 1, 0)  // Head is up (set to 0,-1,0 to look upside-down)
     );
 
-    // Model matrix
+    // Model matrix - 模型矩阵（缩放、旋转、平移）
     glm::mat4 Model = glm::mat4(1.0f);
     Model = glm::scale(Model, glm::vec3(scaleX, scaleY, 1.0f));
     Model = glm::rotate(Model, radiansX, glm::vec3(1.0f, 0.0f, 0.0f));
@@ -184,6 +221,12 @@ void GLCameraRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float
 
 }
 
+/**
+ * @brief 更新MVP矩阵（完整版本）
+ * @param pTransformMatrix 变换矩阵参数（包含旋转、缩放、平移、镜像等）
+ *
+ * 根据完整的变换参数计算MVP矩阵，支持镜像和任意角度旋转
+ */
 void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
     //BaseGLRender::UpdateMVPMatrix(pTransformMatrix);
     m_transformMatrix = *pTransformMatrix;
@@ -192,15 +235,17 @@ void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
     float radiansX = static_cast<float>(MATH_PI / 180.0f * pTransformMatrix->angleX);
     float radiansY = static_cast<float>(MATH_PI / 180.0f * pTransformMatrix->angleY);
 
+    // 根据镜像参数设置缩放因子
     float fFactorX = 1.0f;
     float fFactorY = 1.0f;
 
     if (pTransformMatrix->mirror == 1) {
-        fFactorX = -1.0f;
+        fFactorX = -1.0f;  // 水平镜像
     } else if (pTransformMatrix->mirror == 2) {
-        fFactorY = -1.0f;
+        fFactorY = -1.0f;  // 垂直镜像
     }
 
+    // 计算旋转角度（弧度），针对不同镜像模式调整旋转方向
     float fRotate = MATH_PI * pTransformMatrix->degree * 1.0f / 180;
     if (pTransformMatrix->mirror == 0) {
         if (pTransformMatrix->degree == 270) {
@@ -220,20 +265,22 @@ void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
         }
     }
 
+    // 投影矩阵
     glm::mat4 Projection = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f);
+    // 视图矩阵
     glm::mat4 View = glm::lookAt(
             glm::vec3(0, 0, 1), // Camera is at (0,0,1), in World Space
             glm::vec3(0, 0, 0), // and looks at the origin
             glm::vec3(0, 1, 0) // Head is up (set to 0,-1,0 to look upside-down)
     );
 
-    // Model matrix : an identity matrix (model will be at the origin)
+    // 模型矩阵：应用缩放、旋转和平移变换
     glm::mat4 Model = glm::mat4(1.0f);
     Model = glm::scale(Model, glm::vec3(fFactorX * pTransformMatrix->scaleX,
                                         fFactorY * pTransformMatrix->scaleY, 1.0f));
-    Model = glm::rotate(Model, fRotate, glm::vec3(0.0f, 0.0f, 1.0f));
-    Model = glm::rotate(Model, radiansX, glm::vec3(1.0f, 0.0f, 0.0f));
-    Model = glm::rotate(Model, radiansY, glm::vec3(0.0f, 1.0f, 0.0f));
+    Model = glm::rotate(Model, fRotate, glm::vec3(0.0f, 0.0f, 1.0f));  // Z轴旋转
+    Model = glm::rotate(Model, radiansX, glm::vec3(1.0f, 0.0f, 0.0f));  // X轴旋转
+    Model = glm::rotate(Model, radiansY, glm::vec3(0.0f, 1.0f, 0.0f));  // Y轴旋转
     Model = glm::translate(Model,
                            glm::vec3(pTransformMatrix->translateX, pTransformMatrix->translateY, 0.0f));
 
@@ -244,9 +291,14 @@ void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
     m_MVPMatrix = Projection * View * Model;
 }
 
+/**
+ * @brief OpenGL Surface创建时回调
+ * 初始化OpenGL程序、纹理、VBO、VAO等资源
+ */
 void GLCameraRender::OnSurfaceCreated() {
     LOGCATE("GLCameraRender::OnSurfaceCreated");
 
+    // 创建两个着色器程序：一个用于屏幕显示，一个用于FBO离屏渲染
     m_ProgramObj = GLUtils::CreateProgram(vShaderStr, fShaderStr);
     m_FboProgramObj = GLUtils::CreateProgram(vShaderStr, fShaderStr);
     if (!m_ProgramObj || !m_FboProgramObj)
@@ -255,6 +307,7 @@ void GLCameraRender::OnSurfaceCreated() {
         return;
     }
 
+    // 创建并配置纹理（用于YUV各个平面）
     glGenTextures(TEXTURE_NUM, m_TextureIds);
     for (int i = 0; i < TEXTURE_NUM ; ++i) {
         glActiveTexture(GL_TEXTURE0 + i);
@@ -266,7 +319,7 @@ void GLCameraRender::OnSurfaceCreated() {
         glBindTexture(GL_TEXTURE_2D, GL_NONE);
     }
 
-    // Generate VBO Ids and load the VBOs with data
+    // 创建VBO并加载顶点数据
     glGenBuffers(3, m_VboIds);
     glBindBuffer(GL_ARRAY_BUFFER, m_VboIds[0]);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verticesCoords), verticesCoords, GL_STATIC_DRAW);
@@ -277,7 +330,7 @@ void GLCameraRender::OnSurfaceCreated() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_VboIds[2]);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
-    // Generate VAO Id
+    // 创建VAO并绑定顶点属性
     glGenVertexArrays(1, &m_VaoId);
     glBindVertexArray(m_VaoId);
 
@@ -298,6 +351,13 @@ void GLCameraRender::OnSurfaceCreated() {
     m_TouchXY = vec2(0.5f, 0.5f);
 }
 
+/**
+ * @brief Surface尺寸变化时回调
+ * @param w 新的宽度
+ * @param h 新的高度
+ *
+ * 更新视口尺寸和清屏颜色
+ */
 void GLCameraRender::OnSurfaceChanged(int w, int h) {
     LOGCATE("GLCameraRender::OnSurfaceChanged [w, h]=[%d, %d]", w, h);
     m_ScreenSize.x = w;
@@ -306,7 +366,16 @@ void GLCameraRender::OnSurfaceChanged(int w, int h) {
     glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
 }
 
+/**
+ * @brief 绘制一帧
+ *
+ * 核心渲染函数，分三个阶段：
+ * 1. 渲染到FBO1（应用滤镜效果）
+ * 2. 渲染到FBO2（调整方向）
+ * 3. 渲染到屏幕
+ */
 void GLCameraRender::OnDrawFrame() {
+    // 如果着色器发生变化，重新创建FBO程序
     if(m_IsShaderChanged) {
         unique_lock<mutex> lock(m_ShaderMutex);
         GLUtils::DeleteProgram(m_FboProgramObj);
@@ -323,15 +392,16 @@ void GLCameraRender::OnDrawFrame() {
     LOGCATE("GLCameraRender::OnDrawFrame [w, h]=[%d, %d], format=%d", m_RenderImage.width, m_RenderImage.height, m_RenderImage.format);
     m_FrameIndex++;
 
+    // 更新扩展纹理（如LUT滤镜纹理）
     UpdateExtTexture();
 
     std::unique_lock<std::mutex> lock(m_Mutex);
-    // 渲染到 FBO
+    // 第一步：渲染到 FBO（应用滤镜效果）
     glBindFramebuffer(GL_FRAMEBUFFER, m_SrcFboId);
     glViewport(0, 0, m_RenderImage.height, m_RenderImage.width); //相机的宽和高反了
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(m_FboProgramObj);
-    // upload image data
+    // 上传图像数据到纹理
 
     glBindTexture(GL_TEXTURE_2D, m_SrcFboTextureId);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -339,6 +409,7 @@ void GLCameraRender::OnDrawFrame() {
     glBindTexture(GL_TEXTURE_2D, m_DstFboTextureId);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
+    // 根据图像格式上传纹理数据
     switch (m_RenderImage.format)
     {
         case IMAGE_FORMAT_RGBA:
@@ -442,9 +513,10 @@ void GLCameraRender::OnDrawFrame() {
             break;
     }
 
+    // 绘制到第一个FBO
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
 
-    //再绘制一次，把方向倒过来
+    // 第二步：再绘制一次到第二个FBO，调整方向
     glBindFramebuffer(GL_FRAMEBUFFER, m_DstFboId);
     glViewport(0, 0, m_RenderImage.height, m_RenderImage.width); //相机的宽和高反了,
     glClear(GL_COLOR_BUFFER_BIT);
@@ -460,11 +532,12 @@ void GLCameraRender::OnDrawFrame() {
     GLUtils::setInt(m_ProgramObj, "u_nImgType", IMAGE_FORMAT_RGBA);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
 
+    // 从FBO读取渲染结果，用于录制
     GetRenderFrameFromFBO();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     lock.unlock();
 
-    // 渲染到屏幕
+    // 第三步：渲染到屏幕
     glViewport(0, 0, m_ScreenSize.x, m_ScreenSize.y);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -479,6 +552,12 @@ void GLCameraRender::OnDrawFrame() {
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
 }
 
+/**
+ * @brief 获取单例实例
+ * @return GLCameraRender单例指针
+ *
+ * 线程安全的单例模式实现（双重检查锁定）
+ */
 GLCameraRender *GLCameraRender::GetInstance() {
     if(s_Instance == nullptr)
     {
@@ -492,6 +571,10 @@ GLCameraRender *GLCameraRender::GetInstance() {
     return s_Instance;
 }
 
+/**
+ * @brief 释放单例实例
+ * 线程安全地删除单例对象
+ */
 void GLCameraRender::ReleaseInstance() {
     if(s_Instance != nullptr)
     {
@@ -505,8 +588,14 @@ void GLCameraRender::ReleaseInstance() {
     }
 }
 
+/**
+ * @brief 创建帧缓冲对象（FBO）
+ * @return true表示成功，false表示失败
+ *
+ * 创建两个FBO及其对应的纹理，用于离屏渲染
+ */
 bool GLCameraRender::CreateFrameBufferObj() {
-    // 创建并初始化 FBO 纹理
+    // 创建源FBO纹理
     if(m_SrcFboTextureId == GL_NONE) {
         glGenTextures(1, &m_SrcFboTextureId);
         glBindTexture(GL_TEXTURE_2D, m_SrcFboTextureId);
@@ -579,9 +668,15 @@ bool GLCameraRender::CreateFrameBufferObj() {
     return true;
 }
 
+/**
+ * @brief 从FBO读取渲染后的帧数据
+ *
+ * 使用glReadPixels从FBO读取RGBA数据，并通过回调函数传递给录制模块
+ */
 void GLCameraRender::GetRenderFrameFromFBO() {
     LOGCATE("GLCameraRender::GetRenderFrameFromFBO m_RenderFrameCallback=%p", m_RenderFrameCallback);
     if(m_RenderFrameCallback != nullptr) {
+        // 分配缓冲区并读取像素数据
         uint8_t *pBuffer = new uint8_t[m_RenderImage.width * m_RenderImage.height * 4];
         NativeImage nativeImage = m_RenderImage;
         nativeImage.format = IMAGE_FORMAT_RGBA;
@@ -590,20 +685,31 @@ void GLCameraRender::GetRenderFrameFromFBO() {
         nativeImage.pLineSize[0] = nativeImage.width * 4;
         nativeImage.ppPlane[0] = pBuffer;
         glReadPixels(0, 0, nativeImage.width, nativeImage.height, GL_RGBA, GL_UNSIGNED_BYTE, pBuffer);
+        // 通过回调传递帧数据
         m_RenderFrameCallback(m_CallbackContext, &nativeImage);
         delete []pBuffer;
     }
 }
 
+/**
+ * @brief 设置片段着色器
+ * @param index 着色器索引
+ * @param pShaderStr 着色器源码
+ * @param strSize 源码大小
+ *
+ * 动态更换片段着色器以实现不同的滤镜效果
+ */
 void GLCameraRender::SetFragShaderStr(int index, char *pShaderStr, int strSize) {
     LOGCATE("GLByteFlowRender::LoadFragShaderScript pShaderStr = %p, shaderIndex=%d", pShaderStr,
             index);
     if(m_ShaderIndex != index) {
         unique_lock<mutex> lock(m_ShaderMutex);
+        // 释放旧的着色器缓冲区
         if(m_pFragShaderBuffer != nullptr) {
             free(m_pFragShaderBuffer);
             m_pFragShaderBuffer = nullptr;
         }
+        // 复制新的着色器代码
         m_ShaderIndex = index;
         m_pFragShaderBuffer = static_cast<char *>(malloc(strSize));
         memcpy(m_pFragShaderBuffer, pShaderStr, strSize);
@@ -612,11 +718,20 @@ void GLCameraRender::SetFragShaderStr(int index, char *pShaderStr, int strSize) 
 
 }
 
+/**
+ * @brief 设置LUT滤镜图像
+ * @param index LUT索引
+ * @param pLUTImg LUT图像数据
+ *
+ * 用于实现颜色查找表（LUT）滤镜效果
+ */
 void GLCameraRender::SetLUTImage(int index, NativeImage *pLUTImg) {
     LOGCATE("GLCameraRender::SetLUTImage pImage = %p, index=%d", pLUTImg->ppPlane[0],
             index);
     unique_lock<mutex> lock(m_Mutex);
+    // 释放旧的扩展图像
     NativeImageUtil::FreeNativeImage(&m_ExtImage);
+    // 复制新的LUT图像
     m_ExtImage.width = pLUTImg->width;
     m_ExtImage.height = pLUTImg->height;
     m_ExtImage.format = pLUTImg->format;
@@ -625,12 +740,19 @@ void GLCameraRender::SetLUTImage(int index, NativeImage *pLUTImg) {
     m_ExtImageChanged = true;
 }
 
+/**
+ * @brief 更新扩展纹理
+ *
+ * 当LUT图像发生变化时，更新OpenGL纹理
+ */
 void GLCameraRender::UpdateExtTexture() {
     LOGCATE("GLCameraRender::UpdateExtTexture");
     if(m_ExtImageChanged && m_ExtImage.ppPlane[0] != nullptr) {
+        // 删除旧纹理
         if(m_ExtTextureId != GL_NONE) {
             glDeleteTextures(1, &m_ExtTextureId);
         }
+        // 创建新纹理并上传数据
         glGenTextures(1, &m_ExtTextureId);
         glBindTexture(GL_TEXTURE_2D, m_ExtTextureId);
         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

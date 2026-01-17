@@ -9,6 +9,16 @@
 
 #include "SingleVideoRecorder.h"
 
+/**
+ * @brief 构造函数
+ * @param outUrl 输出文件路径
+ * @param frameWidth 视频帧宽度
+ * @param frameHeight 视频帧高度
+ * @param bitRate 视频比特率
+ * @param fps 帧率
+ *
+ * 初始化单视频录制器参数
+ */
 SingleVideoRecorder::SingleVideoRecorder(const char *outUrl, int frameWidth, int frameHeight,
                                          long bitRate, int fps) {
     LOGCATE("SingleVideoRecorder::SingleVideoRecorder outUrl=%s, [w,h]=[%d,%d], bitRate=%ld, fps=%d", outUrl, frameWidth, frameHeight, bitRate, fps);
@@ -19,26 +29,44 @@ SingleVideoRecorder::SingleVideoRecorder(const char *outUrl, int frameWidth, int
     m_frameRate = fps;
 }
 
+/**
+ * @brief 析构函数
+ * 清理资源
+ */
 SingleVideoRecorder::~SingleVideoRecorder() {
 
 }
 
+/**
+ * @brief 开始录制
+ * @return 0表示成功，负数表示失败
+ *
+ * 初始化FFmpeg编码环境：
+ * 1. 分配输出格式上下文
+ * 2. 打开输出文件
+ * 3. 创建视频流
+ * 4. 查找并配置MPEG4编码器
+ * 5. 启动编码线程
+ */
 int SingleVideoRecorder::StartRecord() {
     LOGCATE("SingleVideoRecorder::StartRecord");
     int result = 0;
     do{
+        // 分配输出格式上下文
         result = avformat_alloc_output_context2(&m_pFormatCtx, nullptr, nullptr, m_outUrl);
         if(result < 0) {
             LOGCATE("SingleVideoRecorder::StartRecord avformat_alloc_output_context2 ret=%d", result);
             break;
         }
 
+        // 打开输出文件
         result = avio_open(&m_pFormatCtx->pb, m_outUrl, AVIO_FLAG_READ_WRITE);
         if(result < 0) {
             LOGCATE("SingleVideoRecorder::StartRecord avio_open ret=%d", result);
             break;
         }
 
+        // 创建视频流
         m_pStream = avformat_new_stream(m_pFormatCtx, nullptr);
         if (m_pStream == nullptr) {
             result = -1;
@@ -46,6 +74,7 @@ int SingleVideoRecorder::StartRecord() {
             break;
         }
 
+        // 查找MPEG4编码器
         m_pCodec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
         if (m_pCodec == nullptr) {
             result = -1;
@@ -53,16 +82,17 @@ int SingleVideoRecorder::StartRecord() {
             break;
         }
 
+        // 配置编码器参数
         m_pCodecCtx = avcodec_alloc_context3(m_pCodec);
         m_pCodecCtx->codec_id = m_pCodec->id;
         m_pCodecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
-        m_pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+        m_pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;  // 输出YUV420P格式
         m_pCodecCtx->width = m_frameWidth;
         m_pCodecCtx->height = m_frameHeight;
         m_pCodecCtx->time_base.num = 1;
         m_pCodecCtx->time_base.den = m_frameRate;
         m_pCodecCtx->bit_rate = m_bitRate;
-        m_pCodecCtx->gop_size = 15;
+        m_pCodecCtx->gop_size = 15;  // 关键帧间隔
 
         result = avcodec_parameters_from_context(m_pStream->codecpar, m_pCodecCtx);
         if(result < 0) {
@@ -78,8 +108,10 @@ int SingleVideoRecorder::StartRecord() {
             break;
         }
 
+        // 打印格式信息
         av_dump_format(m_pFormatCtx, 0, m_outUrl, 1);
 
+        // 分配帧和帧缓冲区
         m_pFrame = av_frame_alloc();
         m_pFrame->width = m_pCodecCtx->width;
         m_pFrame->height = m_pCodecCtx->height;
@@ -101,25 +133,36 @@ int SingleVideoRecorder::StartRecord() {
 
     } while(false);
 
+    // 如果初始化成功，启动编码线程
     if(result >=0) {
         m_encodeThread = new thread(StartH264EncoderThread, this);
     }
     return result;
 }
 
+/**
+ * @brief 停止录制
+ * @return 0表示成功
+ *
+ * 停止编码线程，清理队列中的帧数据，
+ * 刷新编码器，写入文件尾部并释放所有资源
+ */
 int SingleVideoRecorder::StopRecord() {
     m_exit = 1;
     if(m_encodeThread != nullptr) {
+        // 等待编码线程结束
         m_encodeThread->join();
         delete m_encodeThread;
         m_encodeThread = nullptr;
 
+        // 刷新编码器（传入nullptr）
         int result = EncodeFrame(nullptr);
         if(result >= 0) {
             av_write_trailer(m_pFormatCtx);
         }
     }
 
+    // 清理队列中剩余的帧
     while (!m_frameQueue.Empty()) {
         NativeImage *pImage = m_frameQueue.Pop();
         NativeImageUtil::FreeNativeImage(pImage);
@@ -153,17 +196,24 @@ int SingleVideoRecorder::StopRecord() {
     return 0;
 }
 
+/**
+ * @brief 编码线程函数（静态函数）
+ * @param recorder SingleVideoRecorder实例指针
+ *
+ * 从队列中取出视频帧进行格式转换和编码
+ * 循环运行直到停止标志设置且队列为空
+ */
 void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) {
     LOGCATE("SingleVideoRecorder::StartH264EncoderThread start");
-    //停止编码且队列为空时退出循环
+    // 停止编码且队列为空时退出循环
     while (!recorder->m_exit || !recorder->m_frameQueue.Empty())
     {
         if(recorder->m_frameQueue.Empty()) {
-            //队列为空，休眠等待
+            // 队列为空，休眠等待
             usleep(10 * 1000);
             continue;
         }
-        //从队列中取一帧预览帧
+        // 从队列中取一帧视频帧
         NativeImage *pImage = recorder->m_frameQueue.Pop();
         AVFrame *pFrame = recorder->m_pFrame;
         AVPixelFormat srcPixFmt = AV_PIX_FMT_YUV420P;
@@ -184,13 +234,15 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
                 LOGCATE("SingleVideoRecorder::StartH264EncoderThread unsupport format pImage->format=%d", pImage->format);
                 break;
         }
+        // 如果源格式不是YUV420P，需要进行格式转换
         if(srcPixFmt != AV_PIX_FMT_YUV420P) {
             if(recorder->m_SwsContext == nullptr) {
+                // 创建格式转换上下文
                 recorder->m_SwsContext = sws_getContext(pImage->width, pImage->height, srcPixFmt,
                                                         recorder->m_frameWidth, recorder->m_frameHeight, AV_PIX_FMT_YUV420P,
                                                         SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
             }
-            //转换为编码器的目标格式 AV_PIX_FMT_YUV420P
+            // 转换为编码器的目标格式 AV_PIX_FMT_YUV420P
             if(recorder->m_SwsContext != nullptr) {
                 int slice = sws_scale(recorder->m_SwsContext, pImage->ppPlane, pImage->pLineSize, 0,
                           recorder->m_frameHeight, pFrame->data, pFrame->linesize);
@@ -208,9 +260,10 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
                 LOGCATE("SingleVideoRecorder::StartH264EncoderThread sws_scale slice=%d", slice);
             }
         }
-        //设置 pts
+        // 设置时间戳并编码
         pFrame->pts = recorder->m_frameIndex++;
         recorder->EncodeFrame(pFrame);
+        // 释放帧资源
         NativeImageUtil::FreeNativeImage(pImage);
         delete pImage;
     }
@@ -218,9 +271,17 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
     LOGCATE("SingleVideoRecorder::StartH264EncoderThread end");
 }
 
+/**
+ * @brief 接收待编码的视频帧
+ * @param inputFrame 输入的视频帧
+ * @return 0表示成功
+ *
+ * 将视频帧复制一份并加入到编码队列
+ */
 int SingleVideoRecorder::OnFrame2Encode(NativeImage *inputFrame) {
     if(m_exit) return 0;
     LOGCATE("SingleVideoRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
+    // 分配新的图像并复制数据
     NativeImage *pImage = new NativeImage();
     pImage->width = inputFrame->width;
     pImage->height = inputFrame->height;
@@ -228,18 +289,28 @@ int SingleVideoRecorder::OnFrame2Encode(NativeImage *inputFrame) {
     NativeImageUtil::AllocNativeImage(pImage);
     NativeImageUtil::CopyNativeImage(inputFrame, pImage);
     //NativeImageUtil::DumpNativeImage(pImage, "/sdcard", "camera");
+    // 加入编码队列
     m_frameQueue.Push(pImage);
     return 0;
 }
 
+/**
+ * @brief 编码单个视频帧
+ * @param pFrame 待编码的帧（nullptr表示刷新编码器）
+ * @return 0表示成功，负数表示失败
+ *
+ * 将帧发送给编码器并接收编码后的数据包写入文件
+ */
 int SingleVideoRecorder::EncodeFrame(AVFrame *pFrame) {
     int result = 0;
+    // 发送帧到编码器
     result = avcodec_send_frame(m_pCodecCtx, pFrame);
     if(result < 0)
     {
         LOGCATE("SingleVideoRecorder::EncodeFrame avcodec_send_frame fail. ret=%d", result);
         return result;
     }
+    // 从编码器接收数据包
     while(!result) {
         result = avcodec_receive_packet(m_pCodecCtx, &m_avPacket);
         if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
@@ -249,6 +320,7 @@ int SingleVideoRecorder::EncodeFrame(AVFrame *pFrame) {
             return result;
         }
         LOGCATE("SingleVideoRecorder::EncodeFrame frame pts=%ld, size=%d", m_avPacket.pts, m_avPacket.size);
+        // 调整时间戳并写入文件
         m_avPacket.stream_index = m_pStream->index;
         av_packet_rescale_ts(&m_avPacket, m_pCodecCtx->time_base, m_pStream->time_base);
         m_avPacket.pos = -1;

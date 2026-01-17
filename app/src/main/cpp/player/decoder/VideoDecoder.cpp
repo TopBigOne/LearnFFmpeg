@@ -9,20 +9,34 @@
 
 #include "VideoDecoder.h"
 
+/**
+ * @brief 视频解码器准备就绪回调
+ *
+ * 在解码器初始化完成后被调用，用于：
+ * 1. 获取视频宽高信息
+ * 2. 初始化视频渲染器，获取渲染目标尺寸
+ * 3. 创建SwsContext用于视频格式转换（YUV->RGBA等）
+ * 4. 分配RGBA帧缓冲区
+ * 5. 可选：初始化视频录制器（仅在NativeWindow渲染模式下）
+ */
 void VideoDecoder::OnDecoderReady() {
     LOGCATE("VideoDecoder::OnDecoderReady");
+    // 获取视频原始宽高
     m_VideoWidth = GetCodecContext()->width;
     m_VideoHeight = GetCodecContext()->height;
 
+    // 通知播放器解码器已就绪
     if(m_MsgContext && m_MsgCallback)
         m_MsgCallback(m_MsgContext, MSG_DECODER_READY, 0);
 
     if(m_VideoRender != nullptr) {
+        // 初始化渲染器，获取渲染目标尺寸
         int dstSize[2] = {0};
         m_VideoRender->Init(m_VideoWidth, m_VideoHeight, dstSize);
         m_RenderWidth = dstSize[0];
         m_RenderHeight = dstSize[1];
 
+        // 如果是NativeWindow渲染模式，初始化视频录制器
         if(m_VideoRender->GetRenderType() == VIDEO_RENDER_ANWINDOW) {
             int fps = 25;
             long videoBitRate = m_RenderWidth * m_RenderHeight * fps * 0.2;
@@ -30,12 +44,16 @@ void VideoDecoder::OnDecoderReady() {
             m_pVideoRecorder->StartRecord();
         }
 
+        // 分配RGBA帧和缓冲区
         m_RGBAFrame = av_frame_alloc();
         int bufferSize = av_image_get_buffer_size(DST_PIXEL_FORMAT, m_RenderWidth, m_RenderHeight, 1);
         m_FrameBuffer = (uint8_t *) av_malloc(bufferSize * sizeof(uint8_t));
+        // 为RGBA帧填充数据指针和行大小信息
         av_image_fill_arrays(m_RGBAFrame->data, m_RGBAFrame->linesize,
                              m_FrameBuffer, DST_PIXEL_FORMAT, m_RenderWidth, m_RenderHeight, 1);
 
+        // 创建视频格式转换上下文（Sws: Software Scale）
+        // 用于将解码后的视频帧转换为RGBA格式
         m_SwsContext = sws_getContext(m_VideoWidth, m_VideoHeight, GetCodecContext()->pix_fmt,
                                       m_RenderWidth, m_RenderHeight, DST_PIXEL_FORMAT,
                                       SWS_FAST_BILINEAR, NULL, NULL, NULL);
@@ -44,30 +62,41 @@ void VideoDecoder::OnDecoderReady() {
     }
 }
 
+/**
+ * @brief 视频解码器完成回调
+ *
+ * 在解码器停止时被调用，负责释放所有资源
+ */
 void VideoDecoder::OnDecoderDone() {
     LOGCATE("VideoDecoder::OnDecoderDone");
 
+    // 通知播放器解码已完成
     if(m_MsgContext && m_MsgCallback)
         m_MsgCallback(m_MsgContext, MSG_DECODER_DONE, 0);
 
+    // 释放渲染器
     if(m_VideoRender)
         m_VideoRender->UnInit();
 
+    // 释放RGBA帧
     if(m_RGBAFrame != nullptr) {
         av_frame_free(&m_RGBAFrame);
         m_RGBAFrame = nullptr;
     }
 
+    // 释放帧缓冲区
     if(m_FrameBuffer != nullptr) {
         free(m_FrameBuffer);
         m_FrameBuffer = nullptr;
     }
 
+    // 释放格式转换上下文
     if(m_SwsContext != nullptr) {
         sws_freeContext(m_SwsContext);
         m_SwsContext = nullptr;
     }
 
+    // 释放视频录制器
     if(m_pVideoRecorder != nullptr) {
         m_pVideoRecorder->StopRecord();
         delete m_pVideoRecorder;
@@ -76,6 +105,16 @@ void VideoDecoder::OnDecoderDone() {
 
 }
 
+/**
+ * @brief 视频帧可用回调
+ * @param frame 解码后的视频帧
+ *
+ * 当解码器解码出一帧视频数据时被调用，负责：
+ * 1. 根据渲染类型进行格式转换（如果需要）
+ * 2. 将视频帧数据封装为NativeImage
+ * 3. 送给渲染器进行渲染
+ * 4. 可选：送给录制器进行录制
+ */
 void VideoDecoder::OnFrameAvailable(AVFrame *frame) {
     LOGCATE("VideoDecoder::OnFrameAvailable frame=%p", frame);
     if(m_VideoRender != nullptr && frame != nullptr) {

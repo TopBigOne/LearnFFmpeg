@@ -10,6 +10,15 @@
 #include <unistd.h>
 #include "SingleAudioRecorder.h"
 
+/**
+ * @brief 构造函数
+ * @param outUrl 输出文件路径
+ * @param sampleRate 采样率
+ * @param channelLayout 声道布局
+ * @param sampleFormat 采样格式
+ *
+ * 初始化单音频录制器参数
+ */
 SingleAudioRecorder::SingleAudioRecorder(const char *outUrl, int sampleRate, int channelLayout, int sampleFormat) {
     LOGCATE("SingleAudioRecorder::SingleAudioRecorder outUrl=%s, sampleRate=%d, channelLayout=%d, sampleFormat=%d", outUrl, sampleRate, channelLayout, sampleFormat);
     strcpy(m_outUrl, outUrl);
@@ -18,10 +27,25 @@ SingleAudioRecorder::SingleAudioRecorder(const char *outUrl, int sampleRate, int
     m_sampleFormat = sampleFormat;
 }
 
+/**
+ * @brief 析构函数
+ * 清理资源
+ */
 SingleAudioRecorder::~SingleAudioRecorder() {
 
 }
 
+/**
+ * @brief 开始音频录制
+ * @return 0表示成功，负数表示失败
+ *
+ * 初始化音频编码环境：
+ * 1. 分配输出格式上下文并打开文件
+ * 2. 创建音频流
+ * 3. 配置AAC编码器
+ * 4. 创建音频重采样器
+ * 5. 启动编码线程
+ */
 int SingleAudioRecorder::StartRecord() {
     int result = -1;
     do {
@@ -52,12 +76,13 @@ int SingleAudioRecorder::StartRecord() {
             break;
         }
 
+        // 配置AAC编码器参数
         m_pCodecCtx = m_pStream->codec;
         m_pCodecCtx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
         LOGCATE("SingleAudioRecorder::StartRecord avOutputFormat->audio_codec=%d", avOutputFormat->audio_codec);
         m_pCodecCtx->codec_id = AV_CODEC_ID_AAC;
         m_pCodecCtx->codec_type = AVMEDIA_TYPE_AUDIO;
-        m_pCodecCtx->sample_fmt = AV_SAMPLE_FMT_FLTP;//float, planar, 4 字节
+        m_pCodecCtx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // float, planar, 4 字节
         m_pCodecCtx->sample_rate = DEFAULT_SAMPLE_RATE;
         m_pCodecCtx->channel_layout = DEFAULT_CHANNEL_LAYOUT;
         m_pCodecCtx->channels = av_get_channel_layout_nb_channels(m_pCodecCtx->channel_layout);
@@ -85,11 +110,11 @@ int SingleAudioRecorder::StartRecord() {
         avcodec_fill_audio_frame(m_pFrame, m_pCodecCtx->channels, m_pCodecCtx->sample_fmt,
                                  (const uint8_t *) m_pFrameBuffer, m_frameBufferSize, 1);
 
-        //写文件头
+        // 写文件头
         avformat_write_header(m_pFormatCtx, nullptr);
         av_new_packet(&m_avPacket, m_frameBufferSize);
 
-        //音频转码器
+        // 创建音频重采样器，用于格式转换
         m_swrCtx = swr_alloc();
         av_opt_set_channel_layout(m_swrCtx,  "in_channel_layout", m_channelLayout, 0);
         av_opt_set_channel_layout(m_swrCtx,  "out_channel_layout", AV_CH_LAYOUT_STEREO, 0);
@@ -101,6 +126,7 @@ int SingleAudioRecorder::StartRecord() {
 
     } while (false);
 
+    // 如果初始化成功，启动编码线程
     if(result >= 0) {
         m_encodeThread = new thread(StartAACEncoderThread, this);
     }
@@ -108,6 +134,13 @@ int SingleAudioRecorder::StartRecord() {
     return 0;
 }
 
+/**
+ * @brief 接收待编码的音频帧
+ * @param inputFrame 输入的音频帧
+ * @return 0表示成功
+ *
+ * 将音频帧复制一份并加入到编码队列
+ */
 int SingleAudioRecorder::OnFrame2Encode(AudioFrame *inputFrame) {
     LOGCATE("SingleAudioRecorder::OnFrame2Encode nputFrame->data=%p, inputFrame->dataSize=%d", inputFrame->data, inputFrame->dataSize);
     if(m_exit) return 0;
@@ -116,6 +149,13 @@ int SingleAudioRecorder::OnFrame2Encode(AudioFrame *inputFrame) {
     return 0;
 }
 
+/**
+ * @brief 停止音频录制
+ * @return 0表示成功
+ *
+ * 停止编码线程，清理队列中的音频数据，
+ * 写入文件尾部并释放所有资源
+ */
 int SingleAudioRecorder::StopRecord() {
     m_exit = 1;
     if(m_encodeThread != nullptr) {
@@ -161,16 +201,24 @@ int SingleAudioRecorder::StopRecord() {
     return 0;
 }
 
+/**
+ * @brief AAC编码线程函数（静态函数）
+ * @param recorder SingleAudioRecorder实例指针
+ *
+ * 从队列中取出音频帧进行重采样和AAC编码
+ * 循环运行直到停止标志设置且队列为空
+ */
 void SingleAudioRecorder::StartAACEncoderThread(SingleAudioRecorder *recorder) {
     LOGCATE("SingleAudioRecorder::StartAACEncoderThread start");
     while (!recorder->m_exit || !recorder->m_frameQueue.Empty())
     {
         if(recorder->m_frameQueue.Empty()) {
-            //队列为空，休眠等待
+            // 队列为空，休眠等待
             usleep(10 * 1000);
             continue;
         }
 
+        // 从队列取出音频帧并进行重采样
         AudioFrame *audioFrame = recorder->m_frameQueue.Pop();
         AVFrame *pFrame = recorder->m_pFrame;
         int result = swr_convert(recorder->m_swrCtx, pFrame->data, pFrame->nb_samples, (const uint8_t **) &(audioFrame->data), audioFrame->dataSize / 4);
@@ -185,24 +233,34 @@ void SingleAudioRecorder::StartAACEncoderThread(SingleAudioRecorder *recorder) {
     LOGCATE("SingleAudioRecorder::StartAACEncoderThread end");
 }
 
+/**
+ * @brief 编码单个音频帧
+ * @param pFrame 待编码的帧（nullptr表示刷新编码器）
+ * @return 0表示成功，负数表示失败
+ *
+ * 将帧发送给AAC编码器并接收编码后的数据包写入文件
+ */
 int SingleAudioRecorder::EncodeFrame(AVFrame *pFrame) {
     LOGCATE("SingleAudioRecorder::EncodeFrame pFrame->nb_samples=%d", pFrame != nullptr ? pFrame->nb_samples : 0);
     int result = 0;
+    // 发送帧到编码器
     result = avcodec_send_frame(m_pCodecCtx, pFrame);
     if(result < 0)
     {
         LOGCATE("SingleAudioRecorder::EncodeFrame avcodec_send_frame fail. ret=%d", result);
         return result;
     }
+    // 从编码器接收数据包
     while(!result) {
         result = avcodec_receive_packet(m_pCodecCtx, &m_avPacket);
         if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
             return 0;
         } else if (result < 0) {
             LOGCATE("SingleAudioRecorder::EncodeFrame avcodec_receive_packet fail. ret=%d", result);
-            return result;
+            return 0;
         }
         LOGCATE("SingleAudioRecorder::EncodeFrame frame pts=%ld, size=%d", m_avPacket.pts, m_avPacket.size);
+        // 写入文件
         m_avPacket.stream_index = m_pStream->index;
         av_interleaved_write_frame(m_pFormatCtx, &m_avPacket);
         av_packet_unref(&m_avPacket);
