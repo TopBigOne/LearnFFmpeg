@@ -38,7 +38,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String[] REQUEST_PERMISSIONS = {
             Manifest.permission.CAMERA,
             Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
     };
     private static final int PERMISSION_REQUEST_CODE = 1;
     private static  final String [] EXAMPLE_LIST = {
@@ -77,8 +76,9 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         mSampleSelectedIndex = -1;
-        CommonUtils.copyAssetsDirToSDCard(this, "byteflow", "/sdcard");
-        if (!hasPermissionsGranted(REQUEST_PERMISSIONS)) {
+        if (hasPermissionsGranted(REQUEST_PERMISSIONS)) {
+            copyAssetsIfNeeded();
+        } else {
             ActivityCompat.requestPermissions(this, REQUEST_PERMISSIONS, PERMISSION_REQUEST_CODE);
         }
     }
@@ -86,11 +86,20 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            if (!hasPermissionsGranted(REQUEST_PERMISSIONS)) {
-                Toast.makeText(this, "We need the permission: WRITE_EXTERNAL_STORAGE", Toast.LENGTH_SHORT).show();
+            if (hasPermissionsGranted(REQUEST_PERMISSIONS)) {
+                copyAssetsIfNeeded();
+            } else {
+                Toast.makeText(this, "Need CAMERA and RECORD_AUDIO permissions", Toast.LENGTH_SHORT).show();
             }
         } else {
             super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        }
+    }
+
+    private void copyAssetsIfNeeded() {
+        java.io.File filesDir = getExternalFilesDir(null);
+        if (filesDir != null) {
+            CommonUtils.copyAssetsDirToSDCard(this, "byteflow", filesDir.getAbsolutePath());
         }
     }
 

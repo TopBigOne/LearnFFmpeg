@@ -46,7 +46,6 @@ public class AudioRecorderActivity extends AppCompatActivity implements AudioRec
     private static final String RESULT_IMG_DIR = "byteflow/learnffmpeg";
     private static final String[] REQUEST_PERMISSIONS = {
             Manifest.permission.CAMERA,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
     };
     private static final int CAMERA_PERMISSION_REQUEST_CODE = 1;
     protected FFMediaRecorder mFFMediaRecorder;
@@ -208,8 +207,8 @@ public class AudioRecorderActivity extends AppCompatActivity implements AudioRec
 
     }
 
-    public static final File getOutFile(final String ext) {
-        final File dir = new File(Environment.getExternalStorageDirectory(), RESULT_IMG_DIR);
+    public final File getOutFile(final String ext) {
+        final File dir = new File(getExternalFilesDir(null), RESULT_IMG_DIR);
         Log.d(TAG, "path=" + dir.toString());
         dir.mkdirs();
         if (dir.canWrite()) {

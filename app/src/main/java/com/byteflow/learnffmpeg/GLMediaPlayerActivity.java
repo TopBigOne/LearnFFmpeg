@@ -44,18 +44,17 @@ import static com.byteflow.learnffmpeg.media.FFMediaPlayer.VIDEO_RENDER_OPENGL;
 
 public class GLMediaPlayerActivity extends AppCompatActivity implements GLSurfaceView.Renderer, FFMediaPlayer.EventCallback, MyGLSurfaceView.OnGestureCallback{
     private static final String TAG = "MediaPlayerActivity";
-    private static final String[] REQUEST_PERMISSIONS = {
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-    };
+    private static final String[] REQUEST_PERMISSIONS = {};
     private static final int PERMISSION_REQUEST_CODE = 1;
     private MyGLSurfaceView mGLSurfaceView = null;
     private FFMediaPlayer mMediaPlayer = null;
     private SeekBar mSeekBar = null;
     private boolean mIsTouch = false;
-    private String mVideoPath = Environment.getExternalStorageDirectory().getAbsolutePath() + "/byteflow/one_piece.mp4";
+    private String mVideoPath;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mVideoPath = getExternalFilesDir(null).getAbsolutePath() + "/byteflow/one_piece.mp4";
         setContentView(R.layout.activity_gl_media_player);
         mGLSurfaceView = findViewById(R.id.surface_view);
         mGLSurfaceView.setEGLContextClientVersion(3);

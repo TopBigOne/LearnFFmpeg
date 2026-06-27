@@ -39,9 +39,7 @@ import static com.byteflow.learnffmpeg.media.FFMediaPlayer.VIDEO_RENDER_ANWINDOW
 
 public class StreamMediaPlayerActivity extends AppCompatActivity implements SurfaceHolder.Callback, FFMediaPlayer.EventCallback{
     private static final String TAG = "MediaPlayerActivity";
-    private static final String[] REQUEST_PERMISSIONS = {
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-    };
+    private static final String[] REQUEST_PERMISSIONS = {};
     private static final int PERMISSION_REQUEST_CODE = 1;
     private MySurfaceView mSurfaceView = null;
     private FFMediaPlayer mMediaPlayer = null;
