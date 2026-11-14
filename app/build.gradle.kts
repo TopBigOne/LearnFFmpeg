@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.byteflow.learnffmpeg"
-    ndkVersion = "20.0.5594570"
+    ndkVersion = "21.4.7075529"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
