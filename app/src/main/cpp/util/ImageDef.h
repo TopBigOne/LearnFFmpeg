@@ -174,10 +174,12 @@ public:
 	 */
 	static void CopyNativeImage(NativeImage *pSrcImg, NativeImage *pDstImg)
 	{
-	    LOGCATE("NativeImageUtil::CopyNativeImage src[w,h,format]=[%d, %d, %d], dst[w,h,format]=[%d, %d, %d]", pSrcImg->width, pSrcImg->height, pSrcImg->format, pDstImg->width, pDstImg->height, pDstImg->format);
-        LOGCATE("NativeImageUtil::CopyNativeImage src[line0,line1,line2]=[%d, %d, %d], dst[line0,line1,line2]=[%d, %d, %d]", pSrcImg->pLineSize[0], pSrcImg->pLineSize[1], pSrcImg->pLineSize[2], pDstImg->pLineSize[0], pDstImg->pLineSize[1], pDstImg->pLineSize[2]);
+        // 先判空再访问成员（原来在判空前就打印日志解引用了指针）
+        if(pSrcImg == nullptr || pDstImg == nullptr || pSrcImg->ppPlane[0] == nullptr) return;
 
-        if(pSrcImg == nullptr || pSrcImg->ppPlane[0] == nullptr) return;
+	    // 每帧都会调用，使用 VERBOSE 级别，Release 构建中会被编译掉
+	    LOGCATV("NativeImageUtil::CopyNativeImage src[w,h,format]=[%d, %d, %d], dst[w,h,format]=[%d, %d, %d]", pSrcImg->width, pSrcImg->height, pSrcImg->format, pDstImg->width, pDstImg->height, pDstImg->format);
+        LOGCATV("NativeImageUtil::CopyNativeImage src[line0,line1,line2]=[%d, %d, %d], dst[line0,line1,line2]=[%d, %d, %d]", pSrcImg->pLineSize[0], pSrcImg->pLineSize[1], pSrcImg->pLineSize[2], pDstImg->pLineSize[0], pDstImg->pLineSize[1], pDstImg->pLineSize[2]);
 
 		// 检查参数有效性:格式、宽高必须一致
 		if(pSrcImg->format != pDstImg->format ||

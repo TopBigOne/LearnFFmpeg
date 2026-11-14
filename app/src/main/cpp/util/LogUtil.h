@@ -7,14 +7,25 @@
 
 #include<android/log.h>
 #include <sys/time.h>
+#include <time.h>
 
 #define  LOG_TAG "ByteFlow"  // 日志标签
 
 // Android 日志宏定义
 #define  LOGCATE(...)  __android_log_print(ANDROID_LOG_ERROR,LOG_TAG,__VA_ARGS__)    // 错误级别日志
+#define  LOGCATI(...)  __android_log_print(ANDROID_LOG_INFO,LOG_TAG,__VA_ARGS__)     // 信息级别日志
+
+/**
+ * 详细/调试级别日志：用于每帧、每包这类高频热路径。
+ * Release 构建（定义了 NDEBUG）时整体编译掉，避免格式化字符串 + 写 logcat 的开销。
+ */
+#ifdef NDEBUG
+#define  LOGCATV(...)  ((void)0)
+#define  LOGCATD(...)  ((void)0)
+#else
 #define  LOGCATV(...)  __android_log_print(ANDROID_LOG_VERBOSE,LOG_TAG,__VA_ARGS__)  // 详细级别日志
 #define  LOGCATD(...)  __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG,__VA_ARGS__)    // 调试级别日志
-#define  LOGCATI(...)  __android_log_print(ANDROID_LOG_INFO,LOG_TAG,__VA_ARGS__)     // 信息级别日志
+#endif
 
 // 日志宏别名
 #define ByteFlowPrintE LOGCATE
@@ -55,15 +66,18 @@
     LOGCATE("%s func cost time %ldms", FUN, (long)(t1-t0));}
 
 /**
- * @brief 获取系统当前时间（毫秒）
+ * @brief 获取单调时钟当前时间（毫秒）
  * @return 当前时间戳（毫秒）
+ *
+ * 使用 CLOCK_MONOTONIC 而不是 gettimeofday：
+ * 后者是墙上时钟，用户改系统时间或 NTP 校时会让它跳变，音视频同步会被打乱。
+ * 注意返回 long long，在 armeabi-v7a 上 long 只有 32 位，存放时间戳请用 int64_t。
  */
 static long long GetSysCurrentTime()
 {
-	struct timeval time;
-	gettimeofday(&time, NULL);
-	long long curTime = ((long long)(time.tv_sec))*1000+time.tv_usec/1000;
-	return curTime;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((long long)ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
 /**
