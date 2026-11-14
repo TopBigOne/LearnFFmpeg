@@ -30,6 +30,7 @@ void NativeRender::Init(int videoWidth, int videoHeight, int *dstSize)
     // 打印日志：记录窗口句柄和视频原始宽高，便于调试
     LOGCATE("NativeRender::Init m_NativeWindow=%p, video[w,h]=[%d, %d]", m_NativeWindow, videoWidth, videoHeight);
     if(m_NativeWindow == nullptr) return;  // 窗口句柄无效则直接返回，避免空指针崩溃
+    if(videoWidth <= 0 || videoHeight <= 0) return;  // 宽高异常时避免下面除零
 
     int windowWidth = ANativeWindow_getWidth(m_NativeWindow);   // 获取 Surface 实际宽度（单位：像素）
     int windowHeight = ANativeWindow_getHeight(m_NativeWindow); // 获取 Surface 实际高度（单位：像素）
@@ -56,25 +57,50 @@ void NativeRender::Init(int videoWidth, int videoHeight, int *dstSize)
 }
 
 // RenderVideoFrame：将一帧 RGBA 图像数据逐行拷贝到 ANativeWindow 缓冲区并提交显示
+// （VideoDecoder 优先走 LockDirectBuffer 零拷贝路径，这里是需要先得到 RGBA 图像时的通用路径）
 void NativeRender::RenderVideoFrame(NativeImage *pImage)
 {
-    if(m_NativeWindow == nullptr || pImage == nullptr) return;  // 安全检查：句柄或图像数据为空则跳过
-    ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr);  // 锁定缓冲区，获取可写内存地址
-    uint8_t *dstBuffer = static_cast<uint8_t *>(m_NativeWindowBuffer.bits);  // 获取缓冲区起始指针，转为字节指针
+    if(m_NativeWindow == nullptr || pImage == nullptr || pImage->ppPlane[0] == nullptr) return;  // 安全检查
 
-    // 计算源图像每行的字节数（width × 4，因为 RGBA 每像素 4 字节）
-    int srcLineSize = pImage->width * 4;//RGBA
-    // 计算目标缓冲区每行的字节数：stride 是硬件对齐后的行宽（可能大于实际像素宽），× 4 转为字节
-    int dstLineSize = m_NativeWindowBuffer.stride * 4;
+    uint8_t *dstBuffer = nullptr;
+    int dstLineSize = 0;
+    // 锁定缓冲区：Surface 已销毁或尺寸异常时会失败，此时 bits 无效，必须直接返回
+    if(!LockDirectBuffer(&dstBuffer, &dstLineSize)) return;
 
-    // 逐行将源图像数据拷贝到目标缓冲区，处理 stride 不等于 width 的情况
-    for (int i = 0; i < m_DstHeight; ++i) {
-        // 从源偏移  0 读16字节 → 写到目标偏移  0
-        memcpy(dstBuffer + i * dstLineSize, pImage->ppPlane[0] + i * srcLineSize, srcLineSize);
+    // 源图像每行字节数优先使用真实行宽（可能带对齐），没有时按 width × 4 计算
+    int srcLineSize = pImage->pLineSize[0] > 0 ? pImage->pLineSize[0] : pImage->width * 4;
+    // 每行实际拷贝的字节数：取源、目标中较小的一方，防止越界
+    int copyBytes = pImage->width * 4;
+    if(copyBytes > dstLineSize) copyBytes = dstLineSize;
+    int rows = pImage->height < m_NativeWindowBuffer.height ? pImage->height : m_NativeWindowBuffer.height;
+
+    // 逐行拷贝，处理 stride 不等于 width 的情况
+    for (int i = 0; i < rows; ++i) {
+        memcpy(dstBuffer + i * dstLineSize, pImage->ppPlane[0] + i * srcLineSize, copyBytes);
     }
 
-    ANativeWindow_unlockAndPost(m_NativeWindow);  // 解锁缓冲区并提交，触发 Surface 将该帧显示到屏幕
+    UnlockDirectBuffer();  // 解锁缓冲区并提交，触发 Surface 将该帧显示到屏幕
+}
 
+// LockDirectBuffer：锁定窗口缓冲区，返回可直接写入的地址和行字节数
+bool NativeRender::LockDirectBuffer(uint8_t **ppBits, int *pLineSize)
+{
+    if(m_NativeWindow == nullptr) return false;
+    if(ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr) != 0) {
+        LOGCATE("NativeRender::LockDirectBuffer ANativeWindow_lock fail");
+        return false;
+    }
+    *ppBits = static_cast<uint8_t *>(m_NativeWindowBuffer.bits);
+    // stride 是硬件对齐后的行宽（单位：像素），可能大于实际像素宽，× 4 转为字节
+    *pLineSize = m_NativeWindowBuffer.stride * 4;
+    return true;
+}
+
+// UnlockDirectBuffer：解锁并提交显示
+void NativeRender::UnlockDirectBuffer()
+{
+    if(m_NativeWindow)
+        ANativeWindow_unlockAndPost(m_NativeWindow);
 }
 
 // UnInit：反初始化，当前无需清理额外资源（ANativeWindow 在析构函数中释放）

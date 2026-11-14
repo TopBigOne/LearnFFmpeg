@@ -165,12 +165,17 @@ void VRGLRender::Init(int videoWidth, int videoHeight, int *dstSize) {
 }
 
 void VRGLRender::RenderVideoFrame(NativeImage *pImage) {
-    LOGCATE("VRGLRender::RenderVideoFrame pImage=%p, format=%d", pImage, pImage->format);
+    // 先判空再访问 pImage->format
     if(pImage == nullptr || pImage->ppPlane[0] == nullptr)
         return;
+    LOGCATV("VRGLRender::RenderVideoFrame pImage=%p, format=%d", pImage, pImage->format);
     std::unique_lock<std::mutex> lock(m_Mutex);
-    if(m_RenderImage.ppPlane[0] == nullptr)
+    // 单例会被多次播放复用：宽高或格式变化时必须重新分配，否则 CopyNativeImage 会直接放弃拷贝
+    if(m_RenderImage.ppPlane[0] == nullptr || pImage->width != m_RenderImage.width
+       || pImage->height != m_RenderImage.height || pImage->format != m_RenderImage.format)
     {
+        NativeImageUtil::FreeNativeImage(&m_RenderImage);
+        memset(&m_RenderImage, 0, sizeof(NativeImage));
         m_RenderImage.format = pImage->format;
         m_RenderImage.width = pImage->width;
         m_RenderImage.height = pImage->height;
@@ -178,10 +183,16 @@ void VRGLRender::RenderVideoFrame(NativeImage *pImage) {
     }
 
     NativeImageUtil::CopyNativeImage(pImage, &m_RenderImage);
+    m_FrameDirty = true;
     //m_pSingleVideoRecorder->OnFrame2Encode(pImage);
 }
 
 void VRGLRender::UnInit() {
+    // 单例不在这里销毁（GL 线程可能仍在使用），只清掉上一次播放残留的画面
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    NativeImageUtil::FreeNativeImage(&m_RenderImage);
+    memset(&m_RenderImage, 0, sizeof(NativeImage));
+    m_FrameDirty = false;
 //    if(m_pSingleVideoRecorder != nullptr) {
 //        m_pSingleVideoRecorder->StopRecord();
 //        delete m_pSingleVideoRecorder;
@@ -217,6 +228,8 @@ void VRGLRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float sca
     Model = glm::rotate(Model, radiansY, glm::vec3(0.0f, 1.0f, 0.0f));
     Model = glm::translate(Model, glm::vec3(0.0f, 0.0f, 0.0f));
 
+    // 手势线程写、GL 线程读，加锁避免读到写了一半的矩阵
+    std::unique_lock<std::mutex> lock(m_Mutex);
     m_MVPMatrix = Projection * View * Model;
 
 }
@@ -224,12 +237,32 @@ void VRGLRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float sca
 void VRGLRender::OnSurfaceCreated() {
     LOGCATE("VRGLRender::OnSurfaceCreated");
 
+    // 新的 EGL 上下文：纹理需要在下一帧重新分配存储
+    m_TexWidth = m_TexHeight = m_TexFormat = 0;
+    {
+        std::unique_lock<std::mutex> lock(m_Mutex);
+        m_FrameDirty = m_RenderImage.ppPlane[0] != nullptr;
+    }
+
     m_ProgramObj = GLUtils::CreateProgram(vShaderStr, fShaderStr);
     if (!m_ProgramObj)
     {
         LOGCATE("VRGLRender::OnSurfaceCreated create program fail");
         return;
     }
+
+    // 采样器单元固定不变，只设置一次；uniform 位置缓存起来
+    glUseProgram(m_ProgramObj);
+    for (int i = 0; i < TEXTURE_NUM; ++i) {
+        char samplerName[64] = {0};
+        sprintf(samplerName, "s_texture%d", i);
+        glUniform1i(glGetUniformLocation(m_ProgramObj, samplerName), i);
+    }
+    m_MVPMatLoc = glGetUniformLocation(m_ProgramObj, "u_MVPMatrix");
+    m_ImgTypeLoc = glGetUniformLocation(m_ProgramObj, "u_nImgType");
+    // 色度平面行宽不一定是 4 的倍数
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     GenerateMesh();
 
     glGenTextures(TEXTURE_NUM, m_TextureIds);
@@ -279,94 +312,79 @@ void VRGLRender::OnSurfaceChanged(int w, int h) {
     UpdateMVPMatrix(0, 0, 1.0f, 1.0f);
 }
 
-void VRGLRender::OnDrawFrame() {
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    if(m_ProgramObj == GL_NONE || m_RenderImage.ppPlane[0] == nullptr) return;
-    LOGCATE("VRGLRender::OnDrawFrame [w, h]=[%d, %d]", m_RenderImage.width, m_RenderImage.height);
-    m_FrameIndex++;
-    //glEnable(GL_CULL_FACE);
-    glEnable(GL_DEPTH_TEST);
-    // upload image data
-    std::unique_lock<std::mutex> lock(m_Mutex);
+static void UploadPlane(GLuint texId, GLenum unit, GLenum format, int w, int h, const void *data, bool realloc) {
+    glActiveTexture(unit);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    if (realloc) {
+        glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, format, GL_UNSIGNED_BYTE, data);
+    }
+    glBindTexture(GL_TEXTURE_2D, GL_NONE);
+}
+
+void VRGLRender::UploadTextures() {
+    int w = m_RenderImage.width;
+    int h = m_RenderImage.height;
+    bool realloc = w != m_TexWidth || h != m_TexHeight || m_RenderImage.format != m_TexFormat;
+
     switch (m_RenderImage.format)
     {
         case IMAGE_FORMAT_RGBA:
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.width, m_RenderImage.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_RGBA, w, h, m_RenderImage.ppPlane[0], realloc);
             break;
         case IMAGE_FORMAT_NV21:
         case IMAGE_FORMAT_NV12:
-            //upload Y plane data
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width,
-                         m_RenderImage.height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
-            //update UV plane data
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[1]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[1]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_LUMINANCE, w, h, m_RenderImage.ppPlane[0], realloc);
+            UploadPlane(m_TextureIds[1], GL_TEXTURE1, GL_LUMINANCE_ALPHA, w >> 1, h >> 1, m_RenderImage.ppPlane[1], realloc);
             break;
         case IMAGE_FORMAT_I420:
-            //upload Y plane data
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width,
-                         m_RenderImage.height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
-            //update U plane data
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[1]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[1]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
-            //update V plane data
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[2]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[2]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_LUMINANCE, w, h, m_RenderImage.ppPlane[0], realloc);
+            UploadPlane(m_TextureIds[1], GL_TEXTURE1, GL_LUMINANCE, w >> 1, h >> 1, m_RenderImage.ppPlane[1], realloc);
+            UploadPlane(m_TextureIds[2], GL_TEXTURE2, GL_LUMINANCE, w >> 1, h >> 1, m_RenderImage.ppPlane[2], realloc);
             break;
         default:
-            break;
+            return;
     }
+    m_TexWidth = w;
+    m_TexHeight = h;
+    m_TexFormat = m_RenderImage.format;
+}
+
+void VRGLRender::OnDrawFrame() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if(m_ProgramObj == GL_NONE) return;
+
+    // 图像数据会被解码线程改写，检查和上传都在锁内完成
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    if(m_RenderImage.ppPlane[0] == nullptr) return;
+    LOGCATV("VRGLRender::OnDrawFrame [w, h]=[%d, %d]", m_RenderImage.width, m_RenderImage.height);
+    m_FrameIndex++;
+    // 只有新帧到来时才上传纹理
+    if(m_FrameDirty) {
+        UploadTextures();
+        m_FrameDirty = false;
+    }
+    int imgType = m_RenderImage.format;
+    glm::mat4 mvpMatrix = m_MVPMatrix;
     lock.unlock();
 
+    //glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
 
     // Use the program object
     glUseProgram (m_ProgramObj);
 
     glBindVertexArray(m_VaoId);
 
-    GLUtils::setMat4(m_ProgramObj, "u_MVPMatrix", m_MVPMatrix);
+    glUniformMatrix4fv(m_MVPMatLoc, 1, GL_FALSE, &mvpMatrix[0][0]);
 
     for (int i = 0; i < TEXTURE_NUM; ++i) {
         glActiveTexture(GL_TEXTURE0 + i);
         glBindTexture(GL_TEXTURE_2D, m_TextureIds[i]);
-        char samplerName[64] = {0};
-        sprintf(samplerName, "s_texture%d", i);
-        GLUtils::setInt(m_ProgramObj, samplerName, i);
     }
 
-    //float time = static_cast<float>(fmod(m_FrameIndex, 60) / 50);
-    //GLUtils::setFloat(m_ProgramObj, "u_Time", time);
-
-    float offset = (sin(m_FrameIndex * MATH_PI / 25) + 1.0f) / 2.0f;
-    GLUtils::setFloat(m_ProgramObj, "u_Offset", offset);
-    GLUtils::setVec2(m_ProgramObj, "u_TexSize", vec2(m_RenderImage.width, m_RenderImage.height));
-    GLUtils::setInt(m_ProgramObj, "u_nImgType", m_RenderImage.format);
+    glUniform1i(m_ImgTypeLoc, imgType);
 
     glDrawArrays(GL_TRIANGLES, 0, m_VertexCoords.size());
     //glDrawArrays(GL_LINES, 0, m_VertexCoords.size());
@@ -374,14 +392,11 @@ void VRGLRender::OnDrawFrame() {
 }
 
 VRGLRender *VRGLRender::GetInstance() {
+    // 每次都加锁：无锁的"双重检查"在 C++ 内存模型下是数据竞争
+    std::lock_guard<std::mutex> lock(m_Mutex);
     if(s_Instance == nullptr)
     {
-        std::lock_guard<std::mutex> lock(m_Mutex);
-        if(s_Instance == nullptr)
-        {
-            s_Instance = new VRGLRender();
-        }
-
+        s_Instance = new VRGLRender();
     }
     return s_Instance;
 }
@@ -400,6 +415,9 @@ void VRGLRender::ReleaseInstance() {
 }
 
 void VRGLRender::GenerateMesh() {
+    // 每个新的 GL 上下文都会调用一次，先清空，否则顶点数据会不断追加翻倍
+    m_VertexCoords.clear();
+    m_TextureCoords.clear();
     //构建顶点坐标
     for (float vAngle = 90; vAngle > -90; vAngle = vAngle - ANGLE_SPAN) {//垂直方向ANGLE_SPAN度一份
         for (float hAngle = 360; hAngle > 0; hAngle = hAngle - ANGLE_SPAN) {//水平方向ANGLE_SPAN度一份

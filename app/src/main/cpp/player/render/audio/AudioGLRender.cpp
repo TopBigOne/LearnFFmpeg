@@ -20,12 +20,10 @@ AudioGLRender* AudioGLRender::m_pInstance = nullptr;
 std::mutex AudioGLRender::m_Mutex;
 
 AudioGLRender *AudioGLRender::GetInstance() {
+    // 每次都加锁：无竞争时 mutex 的开销很小，而无锁的"双重检查"在 C++ 内存模型下是数据竞争
+    std::unique_lock<std::mutex> lock(m_Mutex);
     if(m_pInstance == nullptr) {
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        if(m_pInstance == nullptr) {
-            m_pInstance = new AudioGLRender();
-        }
-
+        m_pInstance = new AudioGLRender();
     }
     return m_pInstance;
 }
@@ -41,8 +39,11 @@ void AudioGLRender::ReleaseInstance() {
 
 void AudioGLRender::OnSurfaceCreated() {
     ByteFlowPrintE("AudioGLRender::OnSurfaceCreated");
-    if (m_ProgramObj)
-        return;
+    // 单例会跨越多个 GLSurfaceView 存活，而每次 OnSurfaceCreated 都是一个新的 EGL 上下文：
+    // 旧上下文里的 program/VBO/VAO 已经随上下文销毁，这里只需把 ID 清零后重新创建
+    m_ProgramObj = GL_NONE;
+    m_VaoId = GL_NONE;
+    memset(m_VboIds, 0, sizeof(m_VboIds));
     char vShaderStr[] =
             "#version 300 es\n"
             "layout(location = 0) in vec4 a_position;\n"
@@ -118,10 +119,10 @@ void AudioGLRender::OnSurfaceChanged(int w, int h) {
 void AudioGLRender::OnDrawFrame() {
     ByteFlowPrintD("AudioGLRender::OnDrawFrame");
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+    // 网格数据会被音频线程改写，生成网格 + 上传 VBO 都要在锁内完成
     std::unique_lock<std::mutex> lock(m_Mutex);
     if (m_ProgramObj == GL_NONE || m_pAudioBuffer == nullptr) return;
     UpdateMesh();
-    lock.unlock();
 
     // Generate VBO Ids and load the VBOs with data
     if(m_VboIds[0] == 0)
@@ -142,6 +143,7 @@ void AudioGLRender::OnDrawFrame() {
         glBindBuffer(GL_ARRAY_BUFFER, m_VboIds[1]);
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * m_RenderDataSize * 6 * 2, m_pTextureCoords);
     }
+    lock.unlock();
 
     if(m_VaoId == GL_NONE)
     {
@@ -173,31 +175,28 @@ void AudioGLRender::OnDrawFrame() {
 }
 
 void AudioGLRender::UpdateAudioFrame(AudioFrame *audioFrame) {
-    if(audioFrame != nullptr) {
-        ByteFlowPrintD("AudioGLRender::UpdateAudioFrame audioFrame->dataSize=%d", audioFrame->dataSize);
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        if(m_pAudioBuffer != nullptr && m_pAudioBuffer->dataSize != audioFrame->dataSize) {
-            delete m_pAudioBuffer;
-            m_pAudioBuffer = nullptr;
+    if(audioFrame == nullptr || audioFrame->data == nullptr) return;
+    ByteFlowPrintD("AudioGLRender::UpdateAudioFrame audioFrame->dataSize=%d", audioFrame->dataSize);
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    // 可视化缓冲使用固定容量：音频帧长度每帧都可能不同，
+    // 如果跟着帧长重新分配，VBO 大小会对不上（glBufferSubData 越界），GL 线程也可能读到已释放的内存
+    if(m_pAudioBuffer == nullptr) {
+        uint8_t zeros[VISUAL_BUFFER_SIZE] = {0};
+        m_pAudioBuffer = new AudioFrame(zeros, VISUAL_BUFFER_SIZE);
+        m_RenderDataSize = VISUAL_BUFFER_SIZE / RESAMPLE_LEVEL;
 
-            delete [] m_pTextureCoords;
-            m_pTextureCoords = nullptr;
-
-            delete [] m_pVerticesCoords;
-            m_pVerticesCoords = nullptr;
-        }
-
-        if(m_pAudioBuffer == nullptr) {
-            m_pAudioBuffer = new AudioFrame(audioFrame->data, audioFrame->dataSize);
-            m_RenderDataSize = m_pAudioBuffer->dataSize / RESAMPLE_LEVEL;
-
-            m_pVerticesCoords = new vec3[m_RenderDataSize * 6]; //(x,y,z) * 6 points
-            m_pTextureCoords = new vec2[m_RenderDataSize * 6]; //(x,y) * 6 points
-        } else {
-            memcpy(m_pAudioBuffer->data, audioFrame->data, audioFrame->dataSize);
-        }
-        lock.unlock();
+        m_pVerticesCoords = new vec3[m_RenderDataSize * 6]; //(x,y,z) * 6 points
+        m_pTextureCoords = new vec2[m_RenderDataSize * 6]; //(x,y) * 6 points
     }
+    int copySize = audioFrame->dataSize < VISUAL_BUFFER_SIZE ? audioFrame->dataSize : VISUAL_BUFFER_SIZE;
+    memcpy(m_pAudioBuffer->data, audioFrame->data, copySize);
+    if(copySize < VISUAL_BUFFER_SIZE)
+        memset(m_pAudioBuffer->data + copySize, 0, VISUAL_BUFFER_SIZE - copySize);
+}
+
+void AudioGLRender::ClearAudioData() {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    UnInit();
 }
 
 void AudioGLRender::UpdateMesh() {

@@ -27,12 +27,14 @@ public:
      */
     virtual void RenderVideoFrame(NativeImage *pImage);
     virtual void UnInit();
+    virtual bool LockDirectBuffer(uint8_t **ppBits, int *pLineSize);
+    virtual void UnlockDirectBuffer();
 
 private:
     ANativeWindow_Buffer m_NativeWindowBuffer;
     ANativeWindow *m_NativeWindow = nullptr;
-    int m_DstWidth;
-    int m_DstHeight;
+    int m_DstWidth = 0;
+    int m_DstHeight = 0;
 };
 
 

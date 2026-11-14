@@ -24,10 +24,14 @@ extern "C" {
 };
 
 #include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
 #include "Decoder.h"
 
 #define MAX_PATH   2048                        // 最大路径长度
-#define DELAY_THRESHOLD 100                   // 延迟阈值（100ms）
+#define DELAY_THRESHOLD 100                   // 单次同步等待的上限（ms），避免时间戳异常时长时间睡眠
+#define DROP_THRESHOLD  100                   // 视频落后主时钟超过该值（ms）则丢帧追赶
 
 using namespace std;
 
@@ -57,6 +61,12 @@ enum DecoderMsg {
  *
  * 继承自Decoder接口，实现基于FFmpeg的音视频解码功能
  * 提供解码线程管理、音视频同步等基础功能
+ *
+ * 音视频同步策略（音频为主时钟）：
+ *  - 音频解码线程不主动睡眠，由音频渲染器的有界队列"反压"控制节奏，
+ *    音频渲染器根据真正送进声卡的帧维护音频时钟；
+ *  - 视频解码线程通过 AVSyncCallback 读取音频时钟，早了就等、晚太多就丢帧；
+ *  - 拿不到音频时钟（没有音轨、音频还没开始播）时，退回到以系统单调时钟为参考。
  */
 class DecoderBase : public Decoder {
 public:
@@ -74,19 +84,19 @@ public:
 
     /**
      * @brief 开始播放
-     * 启动解码线程，开始解码并播放媒体数据
+     * 首次调用时启动解码线程，之后调用用于从暂停中恢复
      */
     virtual void Start();
 
     /**
      * @brief 暂停播放
-     * 暂停解码线程，保持当前位置
+     * 解码线程阻塞在条件变量上（不轮询），保持当前位置
      */
     virtual void Pause();
 
     /**
      * @brief 停止播放
-     * 停止解码线程并释放资源
+     * 通知解码线程退出
      */
     virtual void Stop();
 
@@ -102,20 +112,19 @@ public:
 
     /**
      * @brief 跳转到指定播放位置
-     * @param position 目标播放位置（秒）
+     * @param position 目标播放位置（秒），允许为 0
      */
     virtual void SeekToPosition(float position);
 
     /**
      * @brief 获取当前播放位置
-     * 用于更新进度条和音视频同步
-     * @return 当前播放位置（秒）
+     * @return 当前播放位置（毫秒）
      */
     virtual float GetCurrentPosition();
 
     /**
      * @brief 清空缓存
-     * 派生类可重写此方法以实现特定的缓存清理逻辑
+     * 派生类可重写此方法以实现特定的缓存清理逻辑（seek 时调用）
      */
     virtual void ClearCache()
     {};
@@ -132,9 +141,9 @@ public:
     }
 
     /**
-     * @brief 设置音视频同步回调
+     * @brief 设置音视频同步回调（获取主时钟）
      * @param context 上下文
-     * @param callback 同步回调函数
+     * @param callback 返回主时钟（毫秒），无效时返回 -1
      */
     virtual void SetAVSyncCallback(void* context, AVSyncCallback callback)
     {
@@ -156,28 +165,25 @@ protected:
 
     /**
      * @brief 释放解码器资源
-     * 释放FFmpeg相关的所有资源，包括上下文、packet、frame等
+     * 停止并回收解码线程
      */
     virtual void UnInit();
 
     /**
      * @brief 解码器准备就绪回调（纯虚函数）
      * 当解码器初始化成功并准备好开始解码时调用
-     * 派生类必须实现此方法
      */
     virtual void OnDecoderReady() = 0;
 
     /**
      * @brief 解码完成回调（纯虚函数）
-     * 当所有数据解码完成时调用
-     * 派生类必须实现此方法
+     * 解码线程退出前调用，派生类在这里释放自己的资源
      */
     virtual void OnDecoderDone() = 0;
 
     /**
      * @brief 解码数据的回调（纯虚函数）
      * @param frame 解码后的帧数据（音频帧或视频帧）
-     * 派生类必须实现此方法来处理解码后的帧
      */
     virtual void OnFrameAvailable(AVFrame *frame) = 0;
 
@@ -187,6 +193,13 @@ protected:
      */
     AVCodecContext *GetCodecContext() {
         return m_AVCodecContext;
+    }
+
+    /**
+     * @brief 当前帧的显示时间戳（毫秒），在 OnFrameAvailable 中可用
+     */
+    int64_t GetCurrentTimeStamp() {
+        return m_CurTimeStamp;
     }
 
 private:
@@ -205,41 +218,47 @@ private:
 
     /**
      * @brief 启动解码线程
-     * 创建并启动后台解码线程
      */
     void StartDecodingThread();
 
     /**
      * @brief 音视频解码循环
-     * 在解码线程中持续读取packet、解码并处理帧数据
      * 处理暂停、停止、seek等状态变化
      */
     void DecodingLoop();
 
     /**
      * @brief 更新显示时间戳
-     * 根据当前解码帧的PTS更新播放时间戳
+     * 根据当前解码帧的 best_effort_timestamp 更新播放时间戳
      */
     void UpdateTimeStamp();
 
     /**
      * @brief 音视频同步
-     * 通过回调获取音视频同步时间差，计算需要延迟的时间
-     * @return 同步延迟时间（毫秒），用于控制播放速度
+     * @return true 渲染该帧；false 该帧已经严重落后，丢弃
      */
-    long AVSync();
+    bool AVSync();
 
     /**
-     * @brief 解码一个packet编码数据
-     * 发送packet到解码器并接收解码后的frame
-     * @return 解码结果，0表示成功，负数表示错误
+     * @brief 执行一次待处理的 seek（如果有）
+     */
+    void DoSeekIfNeeded();
+
+    /**
+     * @brief 把解码器里已经可以输出的帧全部取出并处理
+     * @return 取出的帧数
+     */
+    int ReceiveFrames();
+
+    /**
+     * @brief 读取并解码一个packet，直到至少输出一帧
+     * @return 0 成功；-1 文件读完且解码器已排空
      */
     int DecodeOnePacket();
 
     /**
      * @brief 解码线程函数（静态函数）
      * @param decoder 解码器实例指针
-     * 线程入口函数，调用DecodingLoop执行实际解码工作
      */
     static void DoAVDecoding(DecoderBase *decoder);
 
@@ -256,24 +275,27 @@ private:
     char             m_Url[MAX_PATH] = {0};               // 媒体文件地址
     int              m_StreamIndex = -1;                  // 当前处理的数据流索引
 
-    // 时间相关
-    long             m_CurTimeStamp = 0;               // 当前播放时间戳（毫秒）
-    long             m_StartTimeStamp = -1;            // 播放的起始时间戳（毫秒）
-    long             m_Duration = 0;                   // 总时长（毫秒）
+    // 时间相关（统一用 int64_t：armeabi-v7a 上 long 只有 32 位）
+    std::atomic<int64_t> m_CurTimeStamp{0};            // 当前帧显示时间戳（毫秒）
+    int64_t          m_StartTimeStamp = -1;            // 系统时钟参考下的播放起点（毫秒）
+    int64_t          m_PauseTimeStamp = -1;            // 进入暂停时的系统时间（毫秒）
+    int64_t          m_LastProgressTime = -1;          // 上次上报进度的时间戳，用于节流
+    int64_t          m_Duration = 0;                   // 总时长（毫秒）
+    bool             m_InputEOF = false;               // 已读到文件末尾并送入了 flush 包
 
     // 线程同步
-    mutex               m_Mutex;                       // 互斥锁，保护共享数据
-    condition_variable  m_Cond;                        // 条件变量，用于线程间通信
+    mutex               m_Mutex;                       // 互斥锁，保护状态切换
+    condition_variable  m_Cond;                        // 条件变量，用于暂停/恢复/退出唤醒
     thread             *m_Thread = nullptr;            // 解码线程指针
 
-    // Seek 相关
-    volatile float      m_SeekPosition = 0;            // 目标 seek 位置（秒）
-    volatile bool       m_SeekSuccess = false;         // seek 操作是否成功
+    // Seek 相关：-1 表示没有待处理的 seek
+    std::atomic<float>  m_SeekPosition{-1.0f};         // 目标 seek 位置（秒）
+    bool                m_ResetClockOnNextFrame = false;// seek 成功后，下一帧需要重建系统时钟参考
 
     // 状态和回调
-    volatile int        m_DecoderState = STATE_UNKNOWN;   // 解码器当前状态
+    std::atomic<int>    m_DecoderState{STATE_UNKNOWN};    // 解码器当前状态
     void*               m_AVDecoderContext = nullptr;     // 音视频同步回调的上下文指针
-    AVSyncCallback      m_AVSyncCallback = nullptr;       // 音视频同步回调函数
+    AVSyncCallback      m_AVSyncCallback = nullptr;       // 获取主时钟的回调
 };
 
 

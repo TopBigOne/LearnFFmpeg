@@ -23,6 +23,7 @@
 #define MEDIA_PARAM_VIDEO_DURATION      0x0003    // 视频时长
 
 #define MEDIA_PARAM_ASSET_MANAGER       0x0020    // 资源管理器
+#define MEDIA_PARAM_RECORD_PATH         0x0021    // "边播边录"输出路径（jstring），仅 FFMediaPlayer + NativeWindow 渲染时生效
 
 
 /**

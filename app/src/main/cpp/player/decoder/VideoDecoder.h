@@ -50,6 +50,21 @@ public:
         m_VideoRender = videoRender;
     }
 
+    /**
+     * @brief 设置"边播边录"的输出文件路径（仅 NativeWindow 渲染模式生效）
+     * 不设置则不录制。必须在 Start() 之前调用。
+     * 路径应位于应用私有目录（如 getExternalFilesDir），Android 11+ 无法直接写 /sdcard
+     */
+    void SetRecordPath(const char *path)
+    {
+        if(path == nullptr) {
+            m_RecordPath[0] = '\0';
+            return;
+        }
+        strncpy(m_RecordPath, path, MAX_PATH - 1);
+        m_RecordPath[MAX_PATH - 1] = '\0';
+    }
+
 private:
     virtual void OnDecoderReady();
     virtual void OnDecoderDone();
@@ -69,6 +84,7 @@ private:
     VideoRender *m_VideoRender = nullptr;
     SwsContext *m_SwsContext = nullptr;
     SingleVideoRecorder *m_pVideoRecorder = nullptr;
+    char m_RecordPath[MAX_PATH] = {0};
 };
 
 

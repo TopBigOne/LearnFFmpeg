@@ -27,6 +27,7 @@ import androidx.core.app.ActivityCompat;
 import com.byteflow.learnffmpeg.media.FFMediaPlayer;
 import com.byteflow.learnffmpeg.media.MySurfaceView;
 
+import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_RECORD_PATH;
 import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
 import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
 import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
@@ -125,6 +126,9 @@ public class StreamMediaPlayerActivity extends AppCompatActivity implements Surf
         mMediaPlayer = new FFMediaPlayer();
         mMediaPlayer.addEventCallback(this);
         mMediaPlayer.init(mVideoPath, VIDEO_RENDER_ANWINDOW, surfaceHolder.getSurface());
+        // 边播边录：输出到应用私有目录（Android 11+ 不能直接写 /sdcard 根目录）
+        String recordPath = getExternalFilesDir(null).getAbsolutePath() + "/learnffmpeg_output.mp4";
+        mMediaPlayer.setMediaParams(MEDIA_PARAM_RECORD_PATH, recordPath);
     }
 
     @Override

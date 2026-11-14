@@ -84,6 +84,25 @@ public:
         m_AudioRender = audioRender;
     }
 
+    /** 恢复/开始播放：同时恢复声音输出 */
+    virtual void Start();
+
+    /** 暂停：同时暂停声音输出，音频时钟随之冻结 */
+    virtual void Pause();
+
+    /** 停止：先唤醒可能阻塞在音频队列上的解码线程，否则 join 会卡住 */
+    virtual void Stop();
+
+    /** seek 会让解码器恢复运行，声音输出也要一并恢复 */
+    virtual void SeekToPosition(float position);
+
+    /**
+     * @brief 获取音频时钟（毫秒），作为视频同步的主时钟
+     * 签名与 AVSyncCallback 一致，可直接作为回调传给视频解码器
+     * @return -1 表示当前不可用
+     */
+    static long GetAudioClock(void *context);
+
 private:
     /**
      * @brief 解码器准备就绪回调
@@ -120,9 +139,7 @@ private:
 
     uint8_t      *m_AudioOutBuffer = nullptr;   // 音频输出缓冲区（存放重采样后的数据）
 
-    int           m_nbSamples = 0;              // 重采样后每帧的采样数
-
-    int           m_DstFrameDataSze = 0;        // 重采样后的帧数据大小（字节）
+    int           m_OutBufferSamples = 0;       // 输出缓冲区能容纳的采样数（每声道），不够时按需扩容
 };
 
 

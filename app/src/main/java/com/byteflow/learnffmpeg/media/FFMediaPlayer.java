@@ -30,6 +30,8 @@ public class FFMediaPlayer {
     public static final int MEDIA_PARAM_VIDEO_DURATION  = 0x0003;
 
     public static final int MEDIA_PARAM_ASSET_MANAGER   = 0x0020;
+    // "边播边录"输出文件路径（String），仅 FFMPEG 播放器 + VIDEO_RENDER_ANWINDOW 渲染时生效，需在 play() 之前设置
+    public static final int MEDIA_PARAM_RECORD_PATH     = 0x0021;
 
     public static final int VIDEO_RENDER_OPENGL         = 0;
     public static final int VIDEO_RENDER_ANWINDOW       = 1;

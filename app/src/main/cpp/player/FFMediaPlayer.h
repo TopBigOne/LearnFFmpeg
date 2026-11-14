@@ -66,6 +66,12 @@ public:
      */
     virtual long GetMediaParams(int paramType);
 
+    /**
+     * @brief 设置媒体参数
+     * @param paramType 目前支持 MEDIA_PARAM_RECORD_PATH（obj 为 jstring），需在 Play 之前调用
+     */
+    virtual void SetMediaParams(int paramType, jobject obj);
+
 private:
     /**
      * @brief 获取JNI环境
@@ -100,6 +106,8 @@ private:
 
     VideoRender *m_VideoRender = nullptr;          // 视频渲染器
     AudioRender *m_AudioRender = nullptr;          // 音频渲染器
+
+    jmethodID m_EventCallbackMid = nullptr;        // 缓存的 Java 回调方法 ID，避免每条消息都查找一次
 };
 
 

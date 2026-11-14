@@ -13,6 +13,7 @@
 
 void OpenSLRender::Init() {
     LOGCATE("OpenSLRender::Init");
+    m_Exit = false;
 
     int result = -1;
     do {
@@ -37,7 +38,16 @@ void OpenSLRender::Init() {
             break;
         }
 
-        m_thread = new std::thread(CreateSLWaitingThread, this);
+        result = (*m_AudioPlayerPlay)->SetPlayState(m_AudioPlayerPlay, SL_PLAYSTATE_PLAYING);
+        if(result != SL_RESULT_SUCCESS)
+        {
+            LOGCATE("OpenSLRender::Init SetPlayState fail. result=%d", result);
+            break;
+        }
+
+        // 手动触发第一次"回调"，送入一块静音启动回调链；
+        // 之后每播完一块，OpenSL 都会回调一次，不再需要额外的等待线程
+        HandleAudioFrameQueue();
 
     } while (false);
 
@@ -48,25 +58,23 @@ void OpenSLRender::Init() {
 
 }
 
-void OpenSLRender::RenderAudioFrame(uint8_t *pData, int dataSize) {
-    LOGCATE("OpenSLRender::RenderAudioFrame pData=%p, dataSize=%d", pData, dataSize);
-    if(m_AudioPlayerPlay) {
-        if (pData != nullptr && dataSize > 0) {
+void OpenSLRender::RenderAudioFrame(uint8_t *pData, int dataSize, int64_t pts) {
+    LOGCATV("OpenSLRender::RenderAudioFrame pData=%p, dataSize=%d, pts=%lld", pData, dataSize, (long long)pts);
+    if(m_AudioPlayerPlay == nullptr || pData == nullptr || dataSize <= 0) return;
 
-            //temp resolution, when queue size is too big.
-            while(GetAudioFrameQueueSize() >= MAX_QUEUE_BUFFER_SIZE && !m_Exit)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(15));
-            }
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    // 队列满了就阻塞等待（不再 sleep 轮询），音频解码的节奏由声卡消费速度决定
+    m_Cond.wait(lock, [this] { return m_AudioFrameQueue.size() < MAX_QUEUE_BUFFER_SIZE || m_Exit; });
+    if(m_Exit) return;
+    m_AudioFrameQueue.push(new AudioFrame(pData, dataSize, true, pts));
+}
 
-            std::unique_lock<std::mutex> lock(m_Mutex);
-            AudioFrame *audioFrame = new AudioFrame(pData, dataSize);
-            m_AudioFrameQueue.push(audioFrame);
-            m_Cond.notify_all();
-            lock.unlock();
-        }
+void OpenSLRender::ClearQueueLocked() {
+    // 注意：不能写成 for(i = 0; i < size(); ++i) pop()，size() 在循环中变小，只能清掉一半
+    while(!m_AudioFrameQueue.empty()) {
+        delete m_AudioFrameQueue.front();
+        m_AudioFrameQueue.pop();
     }
-
 }
 
 void OpenSLRender::UnInit() {
@@ -74,19 +82,28 @@ void OpenSLRender::UnInit() {
 
     if (m_AudioPlayerPlay) {
         (*m_AudioPlayerPlay)->SetPlayState(m_AudioPlayerPlay, SL_PLAYSTATE_STOPPED);
-        m_AudioPlayerPlay = nullptr;
     }
 
-    std::unique_lock<std::mutex> lock(m_Mutex);
-    m_Exit = true;
-    m_Cond.notify_all();
-    lock.unlock();
+    // 唤醒可能阻塞在 RenderAudioFrame 里的生产者
+    Abort();
 
+    // Destroy 会等待正在执行的回调返回，之后不会再有回调，m_PlayingFrame 可以安全释放
     if (m_AudioPlayerObj) {
         (*m_AudioPlayerObj)->Destroy(m_AudioPlayerObj);
         m_AudioPlayerObj = nullptr;
-        m_BufferQueue = nullptr;
     }
+
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    m_AudioPlayerPlay = nullptr;
+    m_BufferQueue = nullptr;
+    m_AudioPlayerVolume = nullptr;
+    ClearQueueLocked();
+    if(m_PlayingFrame) {
+        delete m_PlayingFrame;
+        m_PlayingFrame = nullptr;
+    }
+    m_ClockPts = -1;
+    lock.unlock();
 
     if (m_OutputMixObj) {
         (*m_OutputMixObj)->Destroy(m_OutputMixObj);
@@ -99,23 +116,8 @@ void OpenSLRender::UnInit() {
         m_EngineEngine = nullptr;
     }
 
-    lock.lock();
-    for (int i = 0; i < m_AudioFrameQueue.size(); ++i) {
-        AudioFrame *audioFrame = m_AudioFrameQueue.front();
-        m_AudioFrameQueue.pop();
-        delete audioFrame;
-    }
-    lock.unlock();
-
-    if(m_thread != nullptr)
-    {
-        m_thread->join();
-        delete m_thread;
-        m_thread = nullptr;
-    }
-
-    AudioGLRender::ReleaseInstance();
-
+    // 不删除 AudioGLRender 单例（GL 线程可能正在用它绘制），只清掉上一次播放的数据
+    AudioGLRender::GetInstance()->ClearAudioData();
 }
 
 int OpenSLRender::CreateEngine() {
@@ -241,45 +243,46 @@ int OpenSLRender::CreateAudioPlayer() {
     return result;
 }
 
-void OpenSLRender::StartRender() {
-
-    while (GetAudioFrameQueueSize() < MAX_QUEUE_BUFFER_SIZE && !m_Exit) {
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        m_Cond.wait_for(lock, std::chrono::milliseconds(10));
-        //m_Cond.wait(lock);
-        lock.unlock();
-    }
-
-    (*m_AudioPlayerPlay)->SetPlayState(m_AudioPlayerPlay, SL_PLAYSTATE_PLAYING);
-    AudioPlayerCallback(m_BufferQueue, this);
-}
-
 void OpenSLRender::HandleAudioFrameQueue() {
-    LOGCATE("OpenSLRender::HandleAudioFrameQueue QueueSize=%lu", m_AudioFrameQueue.size());
-    if (m_AudioPlayerPlay == nullptr) return;
-
-    while (GetAudioFrameQueueSize() < MAX_QUEUE_BUFFER_SIZE && !m_Exit) {
+    AudioFrame *frameToVisualize = nullptr;
+    {
         std::unique_lock<std::mutex> lock(m_Mutex);
-        m_Cond.wait_for(lock, std::chrono::milliseconds(10));
-    }
+        if (m_BufferQueue == nullptr || m_Exit) return;
 
-    std::unique_lock<std::mutex> lock(m_Mutex);
-    AudioFrame *audioFrame = m_AudioFrameQueue.front();
-    if (nullptr != audioFrame && m_AudioPlayerPlay) {
-        SLresult result = (*m_BufferQueue)->Enqueue(m_BufferQueue, audioFrame->data, (SLuint32) audioFrame->dataSize);
-        if (result == SL_RESULT_SUCCESS) {
-            AudioGLRender::GetInstance()->UpdateAudioFrame(audioFrame);
-            m_AudioFrameQueue.pop();
-            delete audioFrame;
+        // 走到这里说明上一块已经播完，现在才可以释放它
+        if(m_PlayingFrame) {
+            delete m_PlayingFrame;
+            m_PlayingFrame = nullptr;
         }
 
+        SLresult result;
+        if(!m_AudioFrameQueue.empty()) {
+            m_PlayingFrame = m_AudioFrameQueue.front();
+            m_AudioFrameQueue.pop();
+            result = (*m_BufferQueue)->Enqueue(m_BufferQueue, m_PlayingFrame->data, (SLuint32) m_PlayingFrame->dataSize);
+
+            // 这一帧从现在开始播放：更新音频时钟
+            m_ClockPts = m_PlayingFrame->pts;
+            m_ClockUpdateTime = GetSysCurrentTime();
+            m_ClockFrameDuration = m_PlayingFrame->dataSize * 1000LL / (OPENSL_SAMPLE_RATE * OPENSL_BYTES_PER_SAMPLE);
+            frameToVisualize = m_PlayingFrame;
+
+            // 队列腾出了空位，唤醒解码线程
+            m_Cond.notify_all();
+        } else {
+            // 没有数据（还没开始、暂停解码、seek 中、播放结束）：送静音，绝不阻塞回调线程
+            result = (*m_BufferQueue)->Enqueue(m_BufferQueue, m_SilenceBuffer, SILENCE_BUFFER_SIZE);
+            m_ClockPts = -1;
+        }
+
+        if (result != SL_RESULT_SUCCESS) {
+            LOGCATE("OpenSLRender::HandleAudioFrameQueue Enqueue fail. result=%d", result);
+        }
     }
-    lock.unlock();
 
-}
-
-void OpenSLRender::CreateSLWaitingThread(OpenSLRender *openSlRender) {
-    openSlRender->StartRender();
+    // 音频可视化：m_PlayingFrame 只会在本线程的下一次回调中释放，这里在锁外使用是安全的
+    if(frameToVisualize)
+        AudioGLRender::GetInstance()->UpdateAudioFrame(frameToVisualize);
 }
 
 void OpenSLRender::AudioPlayerCallback(SLAndroidSimpleBufferQueueItf bufferQueue, void *context) {
@@ -287,17 +290,49 @@ void OpenSLRender::AudioPlayerCallback(SLAndroidSimpleBufferQueueItf bufferQueue
     openSlRender->HandleAudioFrameQueue();
 }
 
-int OpenSLRender::GetAudioFrameQueueSize() {
-    std::unique_lock<std::mutex> lock(m_Mutex);
-    return m_AudioFrameQueue.size();
-}
-
 void OpenSLRender::ClearAudioCache() {
     std::unique_lock<std::mutex> lock(m_Mutex);
-    for (int i = 0; i < m_AudioFrameQueue.size(); ++i) {
-        AudioFrame *audioFrame = m_AudioFrameQueue.front();
-        m_AudioFrameQueue.pop();
-        delete audioFrame;
-    }
+    ClearQueueLocked();
+    // seek 后旧的时钟作废，等新数据真正开始播放再生效
+    m_ClockPts = -1;
+    m_Cond.notify_all();
+}
 
+void OpenSLRender::Pause() {
+    if(m_AudioPlayerPlay)
+        (*m_AudioPlayerPlay)->SetPlayState(m_AudioPlayerPlay, SL_PLAYSTATE_PAUSED);
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    if(!m_Paused) {
+        m_Paused = true;
+        m_PauseTime = GetSysCurrentTime();
+    }
+}
+
+void OpenSLRender::Resume() {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    if(m_Paused) {
+        m_Paused = false;
+        // 暂停期间声卡没有消费数据，时钟也不应前进
+        m_ClockUpdateTime += GetSysCurrentTime() - m_PauseTime;
+    }
+    lock.unlock();
+    if(m_AudioPlayerPlay)
+        (*m_AudioPlayerPlay)->SetPlayState(m_AudioPlayerPlay, SL_PLAYSTATE_PLAYING);
+}
+
+void OpenSLRender::Abort() {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    m_Exit = true;
+    m_Cond.notify_all();
+}
+
+int64_t OpenSLRender::GetAudioClock() {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    if(m_ClockPts < 0) return -1;
+    int64_t now = m_Paused ? m_PauseTime : GetSysCurrentTime();
+    int64_t elapsed = now - m_ClockUpdateTime;
+    // 一帧播完之前下一次回调还没到，不让时钟超出这一帧的范围
+    if(elapsed > m_ClockFrameDuration) elapsed = m_ClockFrameDuration;
+    if(elapsed < 0) elapsed = 0;
+    return m_ClockPts + elapsed;
 }

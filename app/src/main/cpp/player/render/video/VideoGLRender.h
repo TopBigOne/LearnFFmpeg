@@ -46,16 +46,25 @@ private:
     VideoGLRender();
     virtual ~VideoGLRender();
 
+    /** 把 m_RenderImage 上传到纹理：尺寸/格式不变时只更新数据（glTexSubImage2D），不重新分配存储 */
+    void UploadTextures();
+
     static std::mutex m_Mutex;
     static VideoGLRender* s_Instance;
     GLuint m_ProgramObj = GL_NONE;
-    GLuint m_TextureIds[TEXTURE_NUM];
-    GLuint m_VaoId;
-    GLuint m_VboIds[3];
+    GLuint m_TextureIds[TEXTURE_NUM] = {0};
+    GLuint m_VaoId = GL_NONE;
+    GLuint m_VboIds[3] = {0};
+    GLint  m_MVPMatLoc = -1;                // 缓存 uniform 位置，避免每帧按名字查找
+    GLint  m_ImgTypeLoc = -1;
     NativeImage m_RenderImage;
+    bool   m_FrameDirty = false;            // 有新帧还没上传到纹理
+    int    m_TexWidth = 0;                  // 当前纹理存储对应的图像尺寸/格式
+    int    m_TexHeight = 0;
+    int    m_TexFormat = 0;
     glm::mat4 m_MVPMatrix;
 
-    int m_FrameIndex;
+    int m_FrameIndex = 0;
     vec2 m_TouchXY;
     vec2 m_ScreenSize;
 };

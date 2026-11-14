@@ -55,16 +55,25 @@ private:
     VRGLRender();
     virtual ~VRGLRender();
 
+    /** 尺寸/格式不变时只用 glTexSubImage2D 更新纹理数据（调用方持有 m_Mutex） */
+    void UploadTextures();
+
     static std::mutex m_Mutex;
     static VRGLRender* s_Instance;
     GLuint m_ProgramObj = GL_NONE;
-    GLuint m_TextureIds[TEXTURE_NUM];
-    GLuint m_VaoId;
-    GLuint m_VboIds[2];
+    GLuint m_TextureIds[TEXTURE_NUM] = {0};
+    GLuint m_VaoId = GL_NONE;
+    GLuint m_VboIds[2] = {0};
+    GLint  m_MVPMatLoc = -1;
+    GLint  m_ImgTypeLoc = -1;
     NativeImage m_RenderImage;
-    glm::mat4 m_MVPMatrix;
+    bool   m_FrameDirty = false;
+    int    m_TexWidth = 0;
+    int    m_TexHeight = 0;
+    int    m_TexFormat = 0;
+    glm::mat4 m_MVPMatrix = glm::mat4(1.0f);
 
-    int m_FrameIndex;
+    int m_FrameIndex = 0;
     vec2 m_TouchXY;
     vec2 m_ScreenSize;
     vector<vec3> m_VertexCoords;

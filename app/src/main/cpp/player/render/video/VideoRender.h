@@ -25,6 +25,16 @@ public:
     virtual void RenderVideoFrame(NativeImage *pImage) = 0;
     virtual void UnInit() = 0;
 
+    /**
+     * @brief 直接获取渲染目标的可写缓冲区（零拷贝路径）
+     * 支持的渲染器（如 ANativeWindow）返回 true，调用方可以把像素直接写进去，
+     * 写完后必须调用 UnlockDirectBuffer() 提交显示。
+     * @param ppBits    输出：缓冲区首地址（RGBA）
+     * @param pLineSize 输出：每行字节数（含对齐）
+     */
+    virtual bool LockDirectBuffer(uint8_t **ppBits, int *pLineSize) { return false; }
+    virtual void UnlockDirectBuffer() {}
+
     int GetRenderType() {
         return m_RenderType;
     }

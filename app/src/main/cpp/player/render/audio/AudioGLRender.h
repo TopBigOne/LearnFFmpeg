@@ -10,7 +10,8 @@
 #ifndef LEARNFFMPEG_AUDIOGLRENDER_H
 #define LEARNFFMPEG_AUDIOGLRENDER_H
 
-#include "thread"
+#include <thread>
+#include <mutex>
 #include "AudioRender.h"
 #include <GLES3/gl3.h>
 #include <detail/type_mat.hpp>
@@ -21,6 +22,7 @@ using namespace glm;
 
 #define MAX_AUDIO_LEVEL 5000
 #define RESAMPLE_LEVEL  40
+#define VISUAL_BUFFER_SIZE 4096     // 可视化使用的固定数据长度：1024 个双声道 S16 采样
 
 class AudioGLRender : public BaseGLRender {
 public:
@@ -34,6 +36,9 @@ public:
     virtual void SetTouchLoc(float touchX, float touchY) {}
 
     void UpdateAudioFrame(AudioFrame *audioFrame);
+
+    /** 清掉上一次播放的可视化数据（不销毁单例，GL 线程可能仍在使用它） */
+    void ClearAudioData();
 
 private:
     void Init();
