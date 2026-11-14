@@ -17,6 +17,8 @@
 #include <vec2.hpp>
 #include <render/BaseGLRender.h>
 #include <vector>
+#include <atomic>
+#include <mutex>
 using namespace glm;
 using namespace std;
 
@@ -133,8 +135,18 @@ public:
      * 添加好滤镜之后，视频帧的回调，然后将带有滤镜的视频帧放入编码队列
      */
     void SetRenderCallback(void *ctx, OnRenderFrameCallback callback) {
+        // 回调期间持有同一把锁：这里返回后，旧的回调一定已经执行完，调用方可以安全释放 ctx
+        std::lock_guard<std::mutex> lock(m_CallbackMutex);
         m_CallbackContext = ctx;
         m_RenderFrameCallback = callback;
+    }
+
+    /**
+     * @brief 是否从 FBO 回读画面并回调给录制模块
+     * glReadPixels 会同步等待 GPU、代价很高，只在录制视频时开启
+     */
+    void SetReadbackEnabled(bool enabled) {
+        m_ReadbackEnabled = enabled;
     }
 
     /**
@@ -169,11 +181,20 @@ private:
      */
     bool CreateFrameBufferObj();
 
+    /** FBO 纹理尺寸变化时才重新分配存储（原来每帧都 glTexImage2D 重新分配） */
+    void UpdateFboTextureSize(int width, int height);
+
+    /** 上传相机图像到纹理（调用方持有 m_Mutex） */
+    void UploadTextures();
+
+    /** 根据变换参数计算 MVP 矩阵（GL 线程调用） */
+    void ApplyTransformMatrix(const TransformMatrix &transform);
+
     /**
      * @brief 从FBO获取渲染帧
      * 读取FBO中的像素数据用于编码
      */
-    void GetRenderFrameFromFBO();
+    void GetRenderFrameFromFBO(int width, int height);
 
     /**
      * @brief 创建或更新滤镜素材纹理
@@ -187,9 +208,14 @@ private:
 
     GLuint m_ProgramObj = GL_NONE;                  // 着色器程序对象
     GLuint m_FboProgramObj = GL_NONE;              // FBO着色器程序对象
-    GLuint m_TextureIds[TEXTURE_NUM];              // 纹理ID数组，用于存储YUV纹理
+    GLuint m_TextureIds[TEXTURE_NUM] = {0};        // 纹理ID数组，用于存储YUV纹理
     GLuint m_VaoId = GL_NONE;                      // VAO ID（顶点数组对象）
-    GLuint m_VboIds[3];                            // VBO ID数组（顶点缓冲对象）
+    GLuint m_VboIds[3] = {0};                      // VBO ID数组（顶点缓冲对象）
+    int    m_FboWidth = 0;                         // FBO 纹理当前尺寸
+    int    m_FboHeight = 0;
+    std::vector<uint8_t> m_ReadbackBuffer;         // 回读缓冲，复用，避免每帧 new/delete
+    std::atomic<bool> m_ReadbackEnabled{false};    // 是否回读画面给录制模块
+    std::mutex m_CallbackMutex;                    // 保护回调函数及其上下文
     GLuint m_SrcFboTextureId = GL_NONE;            // 源FBO纹理ID，用于离屏渲染
     GLuint m_SrcFboId = GL_NONE;                   // 源FBO ID
     GLuint m_DstFboTextureId = GL_NONE;            // 目标FBO纹理ID
@@ -199,7 +225,7 @@ private:
     glm::mat4 m_MVPMatrix;                         // MVP变换矩阵（模型-视图-投影）
     TransformMatrix m_transformMatrix;              // 变换矩阵
 
-    int m_FrameIndex;                              // 帧索引，用于时间相关的特效
+    int m_FrameIndex = 0;                          // 帧索引，用于时间相关的特效
     vec2 m_TouchXY;                                // 触摸坐标（归一化）
     vec2 m_ScreenSize;                             // 屏幕尺寸
 
@@ -207,12 +233,12 @@ private:
     void *m_CallbackContext = nullptr;                     // 回调上下文
 
     // 支持滑动选择滤镜功能
-    volatile bool m_IsShaderChanged = false;        // 着色器变更标志
-    volatile bool m_ExtImageChanged = false;        // 外部图像变更标志（用于LUT纹理更新）
+    std::atomic<bool> m_IsShaderChanged{false};     // 着色器变更标志
+    bool m_ExtImageChanged = false;                 // 外部图像变更标志（受 m_Mutex 保护）
     char * m_pFragShaderBuffer = nullptr;           // 片段着色器缓冲区
     NativeImage m_ExtImage;                         // 外部图像（LUT纹理等）
     GLuint m_ExtTextureId = GL_NONE;               // 外部纹理ID
-    int m_ShaderIndex = 0;                         // 当前着色器索引
+    std::atomic<int> m_ShaderIndex{0};             // 当前着色器索引
     mutex m_ShaderMutex;                           // 着色器互斥锁，保护着色器切换
 
 };

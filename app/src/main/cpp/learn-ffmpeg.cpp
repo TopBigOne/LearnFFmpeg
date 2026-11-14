@@ -321,11 +321,13 @@ Java_com_byteflow_learnffmpeg_media_MediaRecorderContext_native_1StartRecord(JNI
                                                                              jint frame_height,
                                                                              jlong video_bit_rate,
                                                                              jint fps) {
-    const char* url = env->GetStringUTFChars(out_url, nullptr);
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
+    if(pContext == nullptr) return -1;
+    const char* url = env->GetStringUTFChars(out_url, nullptr);
+    // 必须等 StartRecord 用完 url 再释放（原来先释放后使用，路径可能变成乱码）
+    int result = pContext->StartRecord(recorder_type, url, frame_width, frame_height, video_bit_rate, fps);
     env->ReleaseStringUTFChars(out_url, url);
-    if(pContext) return pContext->StartRecord(recorder_type, url, frame_width, frame_height, video_bit_rate, fps);
-    return 0;
+    return result;
 }
 
 extern "C"
@@ -334,12 +336,18 @@ Java_com_byteflow_learnffmpeg_media_MediaRecorderContext_native_1OnAudioData(JNI
                                                                              jobject thiz,
                                                                              jbyteArray data,
                                                                              jint size) {
-    int len = env->GetArrayLength (data);
-    unsigned char* buf = new unsigned char[len];
-    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte*>(buf));
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
-    if(pContext) pContext->OnAudioData(buf, len);
-    delete[] buf;
+    if(pContext == nullptr) return;
+    // 只处理本次真正读到的 size 字节：AudioRecord.read 可能读不满整个数组，
+    // 原来按数组长度处理，会把上一次残留的旧数据也编码进去，产生杂音
+    int len = env->GetArrayLength(data);
+    if(size <= 0) return;
+    if(size > len) size = len;
+    // 直接访问 Java 数组内存，录制模块入队时会拷贝一份；JNI_ABORT 表示无需写回
+    jbyte *buf = env->GetByteArrayElements(data, nullptr);
+    if(buf == nullptr) return;
+    pContext->OnAudioData(reinterpret_cast<uint8_t *>(buf), size);
+    env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
 }
 
 extern "C"
@@ -359,12 +367,13 @@ Java_com_byteflow_learnffmpeg_media_MediaRecorderContext_native_1OnPreviewFrame(
                                                                                  jbyteArray data,
                                                                                  jint width,
                                                                                  jint height) {
-    int len = env->GetArrayLength (data);
-    unsigned char* buf = new unsigned char[len];
-    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte*>(buf));
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
-    if(pContext) pContext->OnPreviewFrame(format, buf, width, height);
-    delete[] buf;
+    if(pContext == nullptr) return;
+    // 直接访问 Java 数组内存，省掉一次 new[] + 整帧拷贝（渲染器内部会再拷贝一份）
+    jbyte *buf = env->GetByteArrayElements(data, nullptr);
+    if(buf == nullptr) return;
+    pContext->OnPreviewFrame(format, reinterpret_cast<uint8_t *>(buf), width, height);
+    env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
 }
 
 extern "C"
@@ -415,13 +424,12 @@ Java_com_byteflow_learnffmpeg_media_MediaRecorderContext_native_1SetFilterData(J
                                                                                jint width,
                                                                                jint height,
                                                                                jbyteArray bytes) {
-    int len = env->GetArrayLength (bytes);
-    uint8_t* buf = new uint8_t[len];
-    env->GetByteArrayRegion(bytes, 0, len, reinterpret_cast<jbyte*>(buf));
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
-    if(pContext) pContext->SetLUTImage(index, format, width, height, buf);
-    delete[] buf;
-    env->DeleteLocalRef(bytes);
+    if(pContext == nullptr) return;
+    jbyte *buf = env->GetByteArrayElements(bytes, nullptr);
+    if(buf == nullptr) return;
+    pContext->SetLUTImage(index, format, width, height, reinterpret_cast<uint8_t *>(buf));
+    env->ReleaseByteArrayElements(bytes, buf, JNI_ABORT);
 }
 
 extern "C"
@@ -430,12 +438,11 @@ Java_com_byteflow_learnffmpeg_media_MediaRecorderContext_native_1SetFragShader(J
                                                                                jobject thiz,
                                                                                jint index,
                                                                                jstring str) {
-    int length = env->GetStringUTFLength(str);
-    const char* cStr = env->GetStringUTFChars(str, JNI_FALSE);
-    char *buf = static_cast<char *>(malloc(length + 1));
-    memcpy(buf, cStr, length + 1);
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
-    if(pContext) pContext->SetFragShader(index, buf, length + 1);
-    free(buf);
+    if(pContext == nullptr) return;
+    int length = env->GetStringUTFLength(str);
+    const char* cStr = env->GetStringUTFChars(str, nullptr);
+    // 渲染器内部会拷贝一份，这里直接传入，无需再 malloc 中转
+    pContext->SetFragShader(index, const_cast<char *>(cStr), length + 1);
     env->ReleaseStringUTFChars(str, cStr);
 }

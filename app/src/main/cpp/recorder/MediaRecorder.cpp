@@ -8,355 +8,405 @@
 
 #include "MediaRecorder.h"
 
+// 编码线程等待新数据的超时时间：超时只是为了定期检查退出标志，有数据或停止时会被立即唤醒
+#define QUEUE_WAIT_TIMEOUT_MS 50
+
+static AVPixelFormat ToAVPixelFormat(int imageFormat) {
+    switch (imageFormat) {
+        case IMAGE_FORMAT_RGBA: return AV_PIX_FMT_RGBA;
+        case IMAGE_FORMAT_NV21: return AV_PIX_FMT_NV21;
+        case IMAGE_FORMAT_NV12: return AV_PIX_FMT_NV12;
+        case IMAGE_FORMAT_I420: return AV_PIX_FMT_YUV420P;
+        default:                return AV_PIX_FMT_NONE;
+    }
+}
+
 /**
  * @brief MediaRecorder构造函数
  * @param url 输出文件路径
  * @param param 录制参数（包含视频和音频编码参数）
- *
- * 初始化MediaRecorder实例，设置输出路径和录制参数
  */
 MediaRecorder::MediaRecorder(const char *url, RecorderParam *param) {
     LOGCATE("MediaRecorder::MediaRecorder url=%s", url);
-    strcpy(m_OutUrl, url);
+    strncpy(m_OutUrl, url, sizeof(m_OutUrl) - 1);
     m_RecorderParam = *param;
 }
 
 /**
- * @brief MediaRecorder析构函数
- *
- * 清理资源，释放内存
+ * @brief MediaRecorder析构函数：确保线程已停止、资源已释放
  */
 MediaRecorder::~MediaRecorder() {
-
+    StopRecord();
 }
 
 /**
  * @brief 开始录制
  * @return 0表示成功，负数表示失败
  *
- * 初始化FFmpeg格式上下文、添加音视频流、打开编码器
- * 并启动编码线程开始录制
+ * 初始化FFmpeg格式上下文、添加音视频流、打开编码器、写文件头，然后启动两个编码线程
  */
 int MediaRecorder::StartRecord() {
     LOGCATE("MediaRecorder::StartRecord");
-    int result = 0;
+    int result = -1;
     do {
-        /* 分配输出媒体上下文 */
+        /* 根据文件扩展名推断输出格式 */
         avformat_alloc_output_context2(&m_FormatCtx, NULL, NULL, m_OutUrl);
         if (!m_FormatCtx) {
-            LOGCATE("MediaRecorder::StartRecord Could not deduce output format from file extension: using MPEG.\n");
+            LOGCATE("MediaRecorder::StartRecord Could not deduce output format from file extension: using MPEG.");
             avformat_alloc_output_context2(&m_FormatCtx, NULL, "mpeg", m_OutUrl);
         }
-        if (!m_FormatCtx) {
-            result = -1;
-            break;
-        }
+        if (!m_FormatCtx) break;
 
         m_OutputFormat = m_FormatCtx->oformat;
 
-        /* 使用默认格式编解码器添加音频和视频流并初始化编解码器 */
+        /* 使用该格式的默认编码器添加音频和视频流，每一步都检查返回值 */
         if (m_OutputFormat->video_codec != AV_CODEC_ID_NONE) {
-            AddStream(&m_VideoStream, m_FormatCtx, &m_VideoCodec, m_OutputFormat->video_codec);
-            m_EnableVideo = 1;
+            if (AddStream(&m_VideoStream, &m_VideoCodec, m_OutputFormat->video_codec) < 0) break;
+            m_EnableVideo = true;
         }
         if (m_OutputFormat->audio_codec != AV_CODEC_ID_NONE) {
-            AddStream(&m_AudioStream, m_FormatCtx, &m_AudioCodec, m_OutputFormat->audio_codec);
-            m_EnableAudio = 1;
+            if (AddStream(&m_AudioStream, &m_AudioCodec, m_OutputFormat->audio_codec) < 0) break;
+            m_EnableAudio = true;
         }
 
-        /* 现在所有参数都已设置，我们可以打开音频和视频编解码器并分配必要的编码缓冲区 */
-        if (m_EnableVideo)
-            OpenVideo(m_FormatCtx, m_VideoCodec, &m_VideoStream);
-
-        if (m_EnableAudio)
-            OpenAudio(m_FormatCtx, m_AudioCodec, &m_AudioStream);
+        /* 打开编码器并分配编码缓冲区 */
+        if (m_EnableVideo && OpenVideo(m_VideoCodec, &m_VideoStream) < 0) break;
+        if (m_EnableAudio && OpenAudio(m_AudioCodec, &m_AudioStream) < 0) break;
 
         av_dump_format(m_FormatCtx, 0, m_OutUrl, 1);
 
-        /* 如果需要，打开输出文件 */
+        /* 打开输出文件 */
         if (!(m_OutputFormat->flags & AVFMT_NOFILE)) {
             int ret = avio_open(&m_FormatCtx->pb, m_OutUrl, AVIO_FLAG_WRITE);
             if (ret < 0) {
-                LOGCATE("MediaRecorder::StartRecord Could not open '%s': %s", m_OutUrl,
-                        av_err2str(ret));
-                result = -1;
+                LOGCATE("MediaRecorder::StartRecord Could not open '%s': %s", m_OutUrl, av_err2str(ret));
                 break;
             }
         }
 
-        /* 写入流头部（如果有的话） */
-        result = avformat_write_header(m_FormatCtx, nullptr);
-        if (result < 0) {
-            LOGCATE("MediaRecorder::StartRecord Error occurred when opening output file: %s",
-                    av_err2str(result));
-            result = -1;
+        /* 写入文件头 */
+        int ret = avformat_write_header(m_FormatCtx, nullptr);
+        if (ret < 0) {
+            LOGCATE("MediaRecorder::StartRecord Error occurred when opening output file: %s", av_err2str(ret));
             break;
         }
-
+        m_HeaderWritten = true;
+        result = 0;
     } while (false);
 
-    if (result >= 0) {
-        // 启动编码线程
-        // 注释掉的代码是分别启动音频和视频编码线程
-        // if(m_EnableAudio)
-        //     m_pAudioThread = new thread(StartAudioEncodeThread, this);
-        // if(m_EnableVideo)
-        //     m_pVideoThread = new thread(StartVideoEncodeThread, this);
-
-        // 使用统一的媒体编码线程
-        if(m_pMediaThread == nullptr)
-            m_pMediaThread = new thread(StartMediaEncodeThread, this);
+    if (result < 0) {
+        // 任何一步失败都完整释放，不会留下半初始化的对象
+        Release();
+        return result;
     }
 
-    return result;
+    m_StartTime = GetSysCurrentTime();
+    m_Started = true;
+    // 音频、视频各一个编码线程，彼此不再互相等待
+    if (m_EnableAudio) m_pAudioThread = new thread(AudioEncodeThread, this);
+    if (m_EnableVideo) m_pVideoThread = new thread(VideoEncodeThread, this);
+    return 0;
 }
 
 /**
  * @brief 将音频帧添加到编码队列
- * @param inputFrame 输入的音频帧
- * @return 0表示成功
- *
- * 将音频帧复制一份并加入到线程安全的音频队列中等待编码
  */
 int MediaRecorder::OnFrame2Encode(AudioFrame *inputFrame) {
-    LOGCATE("MediaRecorder::OnFrame2Encode inputFrame->data=%p, inputFrame->dataSize=%d", inputFrame->data, inputFrame->dataSize);
-    if(m_Exit) return 0;
-    AudioFrame *pAudioFrame = new AudioFrame(inputFrame->data, inputFrame->dataSize);
-    m_AudioFrameQueue.Push(pAudioFrame);
+    LOGCATV("MediaRecorder::OnFrame2Encode inputFrame->data=%p, inputFrame->dataSize=%d", inputFrame->data, inputFrame->dataSize);
+    if (!m_Started || m_Exit || !m_EnableAudio) return 0;
+    // 记录到达时间，用于把音频起点与视频对齐
+    AudioFrame *pAudioFrame = new AudioFrame(inputFrame->data, inputFrame->dataSize, true,
+                                             GetSysCurrentTime() - m_StartTime);
+    AudioFrame *dropped = m_AudioFrameQueue.Push(pAudioFrame);
+    if (dropped) {
+        LOGCATE("MediaRecorder::OnFrame2Encode audio queue full, drop oldest frame");
+        delete dropped;
+    }
     return 0;
 }
 
 /**
  * @brief 将视频帧添加到编码队列
- * @param inputFrame 输入的视频帧
- * @return 0表示成功
- *
- * 分配内存并复制视频帧数据，然后加入到线程安全的视频队列中等待编码
  */
-int MediaRecorder::OnFrame2Encode(VideoFrame *inputFrame) {
-    if(m_Exit) return 0;
-    LOGCATE("MediaRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
-    VideoFrame *pImage = new VideoFrame();
-    pImage->width = inputFrame->width;
-    pImage->height = inputFrame->height;
-    pImage->format = inputFrame->format;
-    NativeImageUtil::AllocNativeImage(pImage);
-    NativeImageUtil::CopyNativeImage(inputFrame, pImage);
-    m_VideoFrameQueue.Push(pImage);
+int MediaRecorder::OnFrame2Encode(NativeImage *inputFrame) {
+    if (!m_Started || m_Exit || !m_EnableVideo) return 0;
+    LOGCATV("MediaRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
+    VideoFrame *pFrame = ObtainVideoFrame(inputFrame->width, inputFrame->height, inputFrame->format);
+    NativeImageUtil::CopyNativeImage(inputFrame, pFrame);
+    pFrame->timestamp = GetSysCurrentTime() - m_StartTime;
+    VideoFrame *dropped = m_VideoFrameQueue.Push(pFrame);
+    if (dropped) {
+        // 编码跟不上：丢弃最旧的帧，避免内存无限增长
+        LOGCATE("MediaRecorder::OnFrame2Encode video queue full, drop oldest frame");
+        RecycleVideoFrame(dropped);
+    }
     return 0;
+}
+
+VideoFrame *MediaRecorder::ObtainVideoFrame(int width, int height, int format) {
+    {
+        std::lock_guard<std::mutex> lock(m_FramePoolMutex);
+        while (!m_FramePool.empty()) {
+            VideoFrame *frame = m_FramePool.back();
+            m_FramePool.pop_back();
+            if (frame->width == width && frame->height == height && frame->format == format)
+                return frame;
+            // 尺寸/格式不同的旧缓冲直接释放
+            NativeImageUtil::FreeNativeImage(frame);
+            delete frame;
+        }
+    }
+    VideoFrame *frame = new VideoFrame();
+    frame->width = width;
+    frame->height = height;
+    frame->format = format;
+    NativeImageUtil::AllocNativeImage(frame);
+    return frame;
+}
+
+void MediaRecorder::RecycleVideoFrame(VideoFrame *frame) {
+    if (frame == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(m_FramePoolMutex);
+        if (m_FramePool.size() < MAX_VIDEO_FRAME_POOL) {
+            m_FramePool.push_back(frame);
+            return;
+        }
+    }
+    NativeImageUtil::FreeNativeImage(frame);
+    delete frame;
 }
 
 /**
  * @brief 停止录制
- * @return 0表示成功
  *
- * 设置退出标志，等待编码线程结束，清理队列中的帧数据
- * 写入文件尾部信息并关闭所有流和文件
+ * 通知编码线程不会再有新数据 -> 线程把队列里剩余的数据编码完并刷新编码器后退出 -> 写文件尾 -> 释放资源
  */
 int MediaRecorder::StopRecord() {
     LOGCATE("MediaRecorder::StopRecord");
     m_Exit = true;
-    if(m_pAudioThread != nullptr || m_pVideoThread != nullptr || m_pMediaThread != nullptr) {
+    m_VideoFrameQueue.WakeUpAll();
+    m_AudioFrameQueue.WakeUpAll();
 
-        // 等待音频编码线程结束
-        if(m_pAudioThread != nullptr) {
-            m_pAudioThread->join();
-            delete m_pAudioThread;
-            m_pAudioThread = nullptr;
-        }
-
-        // 等待视频编码线程结束
-        if(m_pVideoThread != nullptr) {
-            m_pVideoThread->join();
-            delete m_pVideoThread;
-            m_pVideoThread = nullptr;
-        }
-
-        // 等待媒体编码线程结束
-        if(m_pMediaThread != nullptr) {
-            m_pMediaThread->join();
-            delete m_pMediaThread;
-            m_pMediaThread = nullptr;
-        }
-
-        // 清理视频帧队列
-        while (!m_VideoFrameQueue.Empty()) {
-            VideoFrame *pImage = m_VideoFrameQueue.Pop();
-            NativeImageUtil::FreeNativeImage(pImage);
-            delete pImage;
-        }
-
-        // 清理音频帧队列
-        while (!m_AudioFrameQueue.Empty()) {
-            AudioFrame *pAudio = m_AudioFrameQueue.Pop();
-            delete pAudio;
-        }
-
-        // 写入文件尾部信息
-        int ret = av_write_trailer(m_FormatCtx);
-        LOGCATE("MediaRecorder::StopRecord while av_write_trailer %s",
-                av_err2str(ret));
-
-        /* 关闭每个编解码器 */
-        if (m_EnableVideo)
-            CloseStream(&m_VideoStream);
-        if (m_EnableAudio)
-            CloseStream(&m_AudioStream);
-
-        if (!(m_OutputFormat->flags & AVFMT_NOFILE))
-            /* 关闭输出文件 */
-            avio_closep(&m_FormatCtx->pb);
-
-        /* 释放流 */
-        avformat_free_context(m_FormatCtx);
+    if (m_pAudioThread != nullptr) {
+        m_pAudioThread->join();
+        delete m_pAudioThread;
+        m_pAudioThread = nullptr;
     }
+
+    if (m_pVideoThread != nullptr) {
+        m_pVideoThread->join();
+        delete m_pVideoThread;
+        m_pVideoThread = nullptr;
+    }
+
+    if (m_Started && m_HeaderWritten) {
+        // 写入文件尾部信息（mp4 的 moov 索引在这里写入，没有它文件无法播放）
+        int ret = av_write_trailer(m_FormatCtx);
+        LOGCATE("MediaRecorder::StopRecord av_write_trailer %s", av_err2str(ret));
+    }
+    m_Started = false;
+
+    Release();
     return 0;
 }
 
-/**
- * @brief 音频编码线程函数（静态函数）
- * @param recorder MediaRecorder实例指针
- *
- * 独立的音频编码线程，负责从音频队列取出音频帧进行编码
- * 通过比较音视频时间戳来保持同步
- */
-void MediaRecorder::StartAudioEncodeThread(MediaRecorder *recorder) {
-    LOGCATE("MediaRecorder::StartAudioEncodeThread start");
-    AVOutputStream *vOs = &recorder->m_VideoStream;
-    AVOutputStream *aOs = &recorder->m_AudioStream;
-    AVFormatContext  *fmtCtx = recorder->m_FormatCtx;
-    while (!aOs->m_EncodeEnd) {
-        double videoTimestamp = vOs->m_NextPts * av_q2d(vOs->m_pCodecCtx->time_base);
-        double audioTimestamp = aOs->m_NextPts * av_q2d(aOs->m_pCodecCtx->time_base);
-        LOGCATE("MediaRecorder::StartAudioEncodeThread [videoTimestamp, audioTimestamp]=[%lf, %lf]", videoTimestamp, audioTimestamp);
-        if (av_compare_ts(vOs->m_NextPts, vOs->m_pCodecCtx->time_base,
-                                           aOs->m_NextPts, aOs->m_pCodecCtx->time_base) >= 0 || vOs->m_EncodeEnd) {
-            LOGCATE("MediaRecorder::StartAudioEncodeThread start queueSize=%d", recorder->m_AudioFrameQueue.Size());
-            //if(audioTimestamp >= videoTimestamp && vOs->m_EncodeEnd) aOs->m_EncodeEnd = vOs->m_EncodeEnd;
-            aOs->m_EncodeEnd = recorder->EncodeAudioFrame(aOs);
-        } else {
-            LOGCATE("MediaRecorder::StartAudioEncodeThread usleep");
-            usleep(5 * 1000);
-        }
+void MediaRecorder::Release() {
+    // 清理队列中剩余的帧
+    while (VideoFrame *pFrame = m_VideoFrameQueue.Pop()) {
+        NativeImageUtil::FreeNativeImage(pFrame);
+        delete pFrame;
     }
-    LOGCATE("MediaRecorder::StartAudioEncodeThread end");
-}
-/**
- * @brief 视频编码线程函数（静态函数）
- * @param recorder MediaRecorder实例指针
- *
- * 独立的视频编码线程，负责从视频队列取出视频帧进行编码
- * 通过比较音视频时间戳来保持同步，优先保证声音连续性
- */
-void MediaRecorder::StartVideoEncodeThread(MediaRecorder *recorder) {
-    LOGCATE("MediaRecorder::StartVideoEncodeThread start");
-    AVOutputStream *vOs = &recorder->m_VideoStream;
-    AVOutputStream *aOs = &recorder->m_AudioStream;
-    while (!vOs->m_EncodeEnd) {
-        double videoTimestamp = vOs->m_NextPts * av_q2d(vOs->m_pCodecCtx->time_base);
-        double audioTimestamp = aOs->m_NextPts * av_q2d(aOs->m_pCodecCtx->time_base);
-        LOGCATE("MediaRecorder::StartVideoEncodeThread [videoTimestamp, audioTimestamp]=[%lf, %lf]", videoTimestamp, audioTimestamp);
-        if (av_compare_ts(vOs->m_NextPts, vOs->m_pCodecCtx->time_base,
-                                           aOs->m_NextPts, aOs->m_pCodecCtx->time_base) <= 0 || aOs->m_EncodeEnd) {
-            LOGCATE("MediaRecorder::StartVideoEncodeThread start queueSize=%d", recorder->m_VideoFrameQueue.Size());
-            // 视频和音频时间戳对齐，人对于声音比较敏感，防止出现视频声音播放结束画面还没结束的情况
-            if(audioTimestamp <= videoTimestamp && aOs->m_EncodeEnd) vOs->m_EncodeEnd = aOs->m_EncodeEnd;
-            vOs->m_EncodeEnd = recorder->EncodeVideoFrame(vOs);
-        } else {
-            LOGCATE("MediaRecorder::StartVideoEncodeThread start usleep");
-            usleep(5 * 1000);
-        }
+    while (AudioFrame *pAudio = m_AudioFrameQueue.Pop()) {
+        delete pAudio;
     }
-    LOGCATE("MediaRecorder::StartVideoEncodeThread end");
+    {
+        std::lock_guard<std::mutex> lock(m_FramePoolMutex);
+        for (VideoFrame *frame : m_FramePool) {
+            NativeImageUtil::FreeNativeImage(frame);
+            delete frame;
+        }
+        m_FramePool.clear();
+    }
+
+    /* 关闭每个编码器 */
+    CloseStream(&m_VideoStream);
+    CloseStream(&m_AudioStream);
+
+    if (m_AudioFifo) {
+        av_audio_fifo_free(m_AudioFifo);
+        m_AudioFifo = nullptr;
+    }
+
+    if (m_FormatCtx) {
+        /* 关闭输出文件 */
+        if (m_OutputFormat && !(m_OutputFormat->flags & AVFMT_NOFILE))
+            avio_closep(&m_FormatCtx->pb);
+        /* 释放上下文和流 */
+        avformat_free_context(m_FormatCtx);
+        m_FormatCtx = nullptr;
+    }
+    m_HeaderWritten = false;
 }
 
+/**
+ * @brief 音频编码线程
+ *
+ * 队列中的 PCM 数据长度由 AudioRecord 决定，和编码器要求的帧长（AAC 为 1024 采样）不一致，
+ * 先写入 FIFO，凑满一整帧再编码。
+ */
+void MediaRecorder::AudioEncodeThread(MediaRecorder *recorder) {
+    LOGCATE("MediaRecorder::AudioEncodeThread start");
+    AVOutputStream *aOs = &recorder->m_AudioStream;
+    int frameSize = aOs->m_pFrame->nb_samples;
+    int bytesPerSample = av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * aOs->m_pCodecCtx->channels;
+    bool firstFrame = true;
+
+    for (;;) {
+        AudioFrame *audioFrame = recorder->m_AudioFrameQueue.WaitPop(QUEUE_WAIT_TIMEOUT_MS);
+        if (audioFrame) {
+            if (firstFrame) {
+                // 用第一块音频的到达时间作为音频起点，使音视频时间轴对齐
+                firstFrame = false;
+                if (audioFrame->pts > 0)
+                    aOs->m_SamplesCount = audioFrame->pts * aOs->m_pCodecCtx->sample_rate / 1000;
+            }
+            void *data = audioFrame->data;
+            av_audio_fifo_write(recorder->m_AudioFifo, &data, audioFrame->dataSize / bytesPerSample);
+            delete audioFrame;
+        } else if (recorder->m_Exit) {
+            // 已停止且队列已空
+            break;
+        }
+
+        while (av_audio_fifo_size(recorder->m_AudioFifo) >= frameSize) {
+            recorder->EncodeAudioSamples(frameSize);
+        }
+    }
+
+    // 不足一帧的剩余采样作为最后一帧编码（编码器允许最后一帧较短），然后刷新编码器
+    int remain = av_audio_fifo_size(recorder->m_AudioFifo);
+    if (remain > 0) recorder->EncodeAudioSamples(remain);
+    recorder->EncodeAndWrite(aOs, nullptr);
+    LOGCATE("MediaRecorder::AudioEncodeThread end");
+}
 
 /**
- * @brief 将编码数据包写入到媒体文件
- * @param fmt_ctx 格式上下文
- * @param time_base 时间基准
- * @param st 流
- * @param pkt 数据包
- * @return 写入结果
- *
- * 调整数据包时间戳并写入到媒体文件中
+ * @brief 视频编码线程
  */
-int MediaRecorder::WritePacket(AVFormatContext *fmt_ctx, AVRational *time_base, AVStream *st,
-                               AVPacket *pkt) {
-    /* 将输出数据包时间戳值从编解码器重新缩放到流时间基 */
+void MediaRecorder::VideoEncodeThread(MediaRecorder *recorder) {
+    LOGCATE("MediaRecorder::VideoEncodeThread start");
+    for (;;) {
+        VideoFrame *videoFrame = recorder->m_VideoFrameQueue.WaitPop(QUEUE_WAIT_TIMEOUT_MS);
+        if (videoFrame) {
+            // 先编码已经取出的帧，原来在停止时会把最后取出的这一帧丢掉
+            recorder->EncodeVideoFrame(videoFrame);
+            recorder->RecycleVideoFrame(videoFrame);
+        } else if (recorder->m_Exit) {
+            break;
+        }
+    }
+    // 刷新编码器，取出缓存的帧
+    recorder->EncodeAndWrite(&recorder->m_VideoStream, nullptr);
+    LOGCATE("MediaRecorder::VideoEncodeThread end");
+}
+
+/**
+ * @brief 将编码数据包写入到媒体文件（两路编码线程共用，加锁串行）
+ */
+int MediaRecorder::WritePacket(AVRational *time_base, AVStream *st, AVPacket *pkt) {
+    /* 将时间戳从编码器时间基换算到流时间基 */
     av_packet_rescale_ts(pkt, *time_base, st->time_base);
     pkt->stream_index = st->index;
 
-    /* 将压缩帧写入媒体文件 */
-    PrintfPacket(fmt_ctx, pkt);
-    return av_interleaved_write_frame(fmt_ctx, pkt);
+    LOGCATV("MediaRecorder::WritePacket stream=%d pts=%s pts_time=%s", st->index,
+            av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base));
+    std::lock_guard<std::mutex> lock(m_WriteMutex);
+    return av_interleaved_write_frame(m_FormatCtx, pkt);
 }
 
-void MediaRecorder::AddStream(AVOutputStream *ost, AVFormatContext *oc, AVCodec **codec,
-                              AVCodecID codec_id) {
+int MediaRecorder::EncodeAndWrite(AVOutputStream *ost, AVFrame *frame) {
+    AVCodecContext *c = ost->m_pCodecCtx;
+    int ret = avcodec_send_frame(c, frame);
+    if (ret < 0 && ret != AVERROR_EOF) {
+        LOGCATE("MediaRecorder::EncodeAndWrite avcodec_send_frame fail. ret=%s", av_err2str(ret));
+        return ret;
+    }
+
+    AVPacket *pkt = av_packet_alloc();
+    for (;;) {
+        ret = avcodec_receive_packet(c, pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        } else if (ret < 0) {
+            LOGCATE("MediaRecorder::EncodeAndWrite avcodec_receive_packet fail. ret=%s", av_err2str(ret));
+            break;
+        }
+        int writeRet = WritePacket(&c->time_base, ost->m_pStream, pkt);
+        if (writeRet < 0) {
+            LOGCATE("MediaRecorder::EncodeAndWrite Error while writing packet: %s", av_err2str(writeRet));
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    return ret;
+}
+
+int MediaRecorder::AddStream(AVOutputStream *ost, AVCodec **codec, AVCodecID codec_id) {
     LOGCATE("MediaRecorder::AddStream");
-    AVCodecContext *c;
-    int i;
+    AVFormatContext *oc = m_FormatCtx;
 
     /* find the encoder */
     *codec = avcodec_find_encoder(codec_id);
     if (!(*codec)) {
-        LOGCATE("MediaRecorder::AddStream Could not find encoder for '%s'",
-                avcodec_get_name(codec_id));
-        return;
+        LOGCATE("MediaRecorder::AddStream Could not find encoder for '%s'", avcodec_get_name(codec_id));
+        return -1;
     }
 
     ost->m_pStream = avformat_new_stream(oc, NULL);
     if (!ost->m_pStream) {
         LOGCATE("MediaRecorder::AddStream Could not allocate stream");
-        return;
+        return -1;
     }
-    ost->m_pStream->id = oc->nb_streams-1;
-    c = avcodec_alloc_context3(*codec);
+    ost->m_pStream->id = oc->nb_streams - 1;
+    AVCodecContext *c = avcodec_alloc_context3(*codec);
     if (!c) {
         LOGCATE("MediaRecorder::AddStream Could not alloc an encoding context");
-        return;
+        return -1;
     }
     ost->m_pCodecCtx = c;
 
     switch ((*codec)->type) {
         case AVMEDIA_TYPE_AUDIO:
             LOGCATE("MediaRecorder::AddStream AVMEDIA_TYPE_AUDIO AVCodecID=%d", codec_id);
-            c->sample_fmt  = (*codec)->sample_fmts ?
-                             (*codec)->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+            c->sample_fmt  = (*codec)->sample_fmts ? (*codec)->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
             c->bit_rate    = 96000;
             c->sample_rate = m_RecorderParam.audioSampleRate;
             c->channel_layout = m_RecorderParam.channelLayout;
-            c->channels        = av_get_channel_layout_nb_channels(c->channel_layout);
-            ost->m_pStream->time_base = (AVRational){ 1, c->sample_rate };
+            c->channels    = av_get_channel_layout_nb_channels(c->channel_layout);
+            c->time_base   = (AVRational){ 1, c->sample_rate };
+            ost->m_pStream->time_base = c->time_base;
             break;
 
         case AVMEDIA_TYPE_VIDEO:
             LOGCATE("MediaRecorder::AddStream AVMEDIA_TYPE_VIDEO AVCodecID=%d", codec_id);
-
             c->codec_id = codec_id;
             c->bit_rate = m_RecorderParam.videoBitRate;
             /* Resolution must be a multiple of two. */
             c->width    = m_RecorderParam.frameWidth;
             c->height   = m_RecorderParam.frameHeight;
-            /* timebase: This is the fundamental unit of time (in seconds) in terms
-             * of which frame timestamps are represented. For fixed-fps content,
-             * timebase should be 1/framerate and timestamp increments should be
-             * identical to 1. */
-            ost->m_pStream->time_base = (AVRational){ 1, m_RecorderParam.fps };
-            c->time_base       = ost->m_pStream->time_base;
-
-            c->gop_size      = 12; /* emit one intra frame every twelve frames at most */
-            c->pix_fmt       = AV_PIX_FMT_YUV420P;
-            if (c->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
-                /* just for testing, we also add B-frames */
-                c->max_b_frames = 2;
-            }
-            if (c->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
-                /* Needed to avoid using macroblocks in which some coeffs overflow.
-                 * This does not happen with normal video, it just happens here as
-                 * the motion of the chroma plane does not match the luma plane. */
-                c->mb_decision = 2;
+            // 时间基取毫秒：pts 直接使用采集时间，相机帧率波动（如暗光降帧）时画面时长仍然正确
+            c->time_base = (AVRational){ 1, 1000 };
+            c->framerate = (AVRational){ m_RecorderParam.fps, 1 };
+            ost->m_pStream->time_base = c->time_base;
+            ost->m_pStream->avg_frame_rate = c->framerate;
+            c->gop_size  = m_RecorderParam.fps;   // 约 1 秒一个关键帧
+            c->pix_fmt   = AV_PIX_FMT_YUV420P;
+            if (c->codec_id == AV_CODEC_ID_H264) {
+                // x264 默认 preset 为 medium，手机上无法实时编码；录制优先保证速度
+                av_opt_set(c->priv_data, "preset", "ultrafast", 0);
+                av_opt_set(c->priv_data, "tune", "zerolatency", 0);
             }
             break;
 
@@ -364,27 +414,15 @@ void MediaRecorder::AddStream(AVOutputStream *ost, AVFormatContext *oc, AVCodec 
             break;
     }
 
-    /* Some formats want stream headers to be separate. */
+    /* mp4 等格式要求编码器把 SPS/PPS 等头信息放在 extradata（全局头）里 */
     if (oc->oformat->flags & AVFMT_GLOBALHEADER)
         c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-}
-
-void MediaRecorder::PrintfPacket(AVFormatContext *fmt_ctx, AVPacket *pkt) {
-    AVRational *time_base = &fmt_ctx->streams[pkt->stream_index]->time_base;
-
-    LOGCATE("MediaRecorder::PrintfPacket pts:%s pts_time:%s dts:%s dts_time:%s duration:%s duration_time:%s stream_index:%d",
-           av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, time_base),
-           av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, time_base),
-           av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, time_base),
-           pkt->stream_index);
+    return 0;
 }
 
 AVFrame *MediaRecorder::AllocAudioFrame(AVSampleFormat sample_fmt, uint64_t channel_layout,
                                         int sample_rate, int nb_samples) {
-    LOGCATE("MediaRecorder::AllocAudioFrame");
     AVFrame *frame = av_frame_alloc();
-    int ret;
-
     if (!frame) {
         LOGCATE("MediaRecorder::AllocAudioFrame Error allocating an audio frame");
         return nullptr;
@@ -395,172 +433,93 @@ AVFrame *MediaRecorder::AllocAudioFrame(AVSampleFormat sample_fmt, uint64_t chan
     frame->sample_rate = sample_rate;
     frame->nb_samples = nb_samples;
 
-    if (nb_samples) {
-        ret = av_frame_get_buffer(frame, 0);
-        if (ret < 0) {
-            LOGCATE("MediaRecorder::AllocAudioFrame Error allocating an audio buffer");
-            return nullptr;
-        }
+    if (nb_samples && av_frame_get_buffer(frame, 0) < 0) {
+        LOGCATE("MediaRecorder::AllocAudioFrame Error allocating an audio buffer");
+        av_frame_free(&frame);   // 失败时释放已分配的 frame
+        return nullptr;
     }
 
     return frame;
 }
 
-int MediaRecorder::OpenAudio(AVFormatContext *oc, AVCodec *codec, AVOutputStream *ost) {
+int MediaRecorder::OpenAudio(AVCodec *codec, AVOutputStream *ost) {
     LOGCATE("MediaRecorder::OpenAudio");
-    AVCodecContext *c;
-    int nb_samples;
-    int ret;
-    c = ost->m_pCodecCtx;
-    /* open it */
-    ret = avcodec_open2(c, codec, nullptr);
+    AVCodecContext *c = ost->m_pCodecCtx;
+    int ret = avcodec_open2(c, codec, nullptr);
     if (ret < 0) {
         LOGCATE("MediaRecorder::OpenAudio Could not open audio codec: %s", av_err2str(ret));
         return -1;
     }
 
-    if (c->codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)
-        nb_samples = 10000;
-    else
-        nb_samples = c->frame_size;
+    // 编码器要求的每帧采样数（AAC 为 1024）；支持可变帧长的编码器取 1024
+    int nb_samples = (c->codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE) || c->frame_size <= 0
+            ? 1024 : c->frame_size;
 
-    ost->m_pFrame  = AllocAudioFrame(c->sample_fmt, c->channel_layout,
-                                     c->sample_rate, nb_samples);
+    ost->m_pFrame = AllocAudioFrame(c->sample_fmt, c->channel_layout, c->sample_rate, nb_samples);
+    // 存放从 FIFO 读出的原始 S16 交错数据
+    ost->m_pTmpFrame = AllocAudioFrame(AV_SAMPLE_FMT_S16, c->channel_layout, c->sample_rate, nb_samples);
+    if (!ost->m_pFrame || !ost->m_pTmpFrame) return -1;
 
-    ost->m_pTmpFrame = av_frame_alloc();
-
-    /* copy the stream parameters to the muxer */
+    /* 编码器打开之后再拷贝参数：此时 extradata（AAC 的 AudioSpecificConfig）才已生成 */
     ret = avcodec_parameters_from_context(ost->m_pStream->codecpar, c);
     if (ret < 0) {
         LOGCATE("MediaRecorder::OpenAudio Could not copy the stream parameters");
         return -1;
     }
 
-    /* create resampler context */
-    ost->m_pSwrCtx = swr_alloc();
-    if (!ost->m_pSwrCtx) {
-        LOGCATE("MediaRecorder::OpenAudio Could not allocate resampler context");
+    /* 采样格式转换：输入是 AudioRecord 采集的 S16 交错，输出为编码器格式（如 FLTP） */
+    ost->m_pSwrCtx = swr_alloc_set_opts(nullptr,
+                                        c->channel_layout, c->sample_fmt, c->sample_rate,
+                                        c->channel_layout, AV_SAMPLE_FMT_S16, c->sample_rate,
+                                        0, nullptr);
+    if (!ost->m_pSwrCtx || swr_init(ost->m_pSwrCtx) < 0) {
+        LOGCATE("MediaRecorder::OpenAudio Failed to initialize the resampling context");
         return -1;
     }
 
-    /* set options */
-    av_opt_set_int       (ost->m_pSwrCtx, "in_channel_count",   c->channels,       0);
-    av_opt_set_int       (ost->m_pSwrCtx, "in_sample_rate",     c->sample_rate,    0);
-    av_opt_set_sample_fmt(ost->m_pSwrCtx, "in_sample_fmt",      AV_SAMPLE_FMT_S16, 0);
-    av_opt_set_int       (ost->m_pSwrCtx, "out_channel_count",  c->channels,       0);
-    av_opt_set_int       (ost->m_pSwrCtx, "out_sample_rate",    c->sample_rate,    0);
-    av_opt_set_sample_fmt(ost->m_pSwrCtx, "out_sample_fmt",     c->sample_fmt,     0);
-
-    /* initialize the resampling context */
-    if ((ret = swr_init(ost->m_pSwrCtx)) < 0) {
-        LOGCATE("MediaRecorder::OpenAudio Failed to initialize the resampling context");
+    m_AudioFifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_S16, c->channels, nb_samples * 4);
+    if (!m_AudioFifo) {
+        LOGCATE("MediaRecorder::OpenAudio av_audio_fifo_alloc fail");
         return -1;
     }
     return 0;
 }
 
-int MediaRecorder::EncodeAudioFrame(AVOutputStream *ost) {
-    LOGCATE("MediaRecorder::EncodeAudioFrame");
-    int result = 0;
-    AVCodecContext *c;
-    AVPacket pkt = { 0 }; // data and size must be 0;
-    AVFrame *frame;
-    int ret;
-    int dst_nb_samples;
+int MediaRecorder::EncodeAudioSamples(int nbSamples) {
+    AVOutputStream *ost = &m_AudioStream;
+    AVCodecContext *c = ost->m_pCodecCtx;
 
-    av_init_packet(&pkt);
-    c = ost->m_pCodecCtx;
+    // 从 FIFO 读出 nbSamples 个 S16 采样
+    if (av_frame_make_writable(ost->m_pTmpFrame) < 0) return -1;
+    int readSamples = av_audio_fifo_read(m_AudioFifo, (void **) ost->m_pTmpFrame->data, nbSamples);
+    if (readSamples <= 0) return -1;
 
-    while (m_AudioFrameQueue.Empty() && !m_Exit) {
-        usleep(10* 1000);
-   }
-
-    AudioFrame *audioFrame = m_AudioFrameQueue.Pop();
-    frame = ost->m_pTmpFrame;
-    if(audioFrame) {
-        frame->data[0] = audioFrame->data;
-        frame->nb_samples = audioFrame->dataSize / 4;
-        frame->pts = ost->m_NextPts;
-        ost->m_NextPts  += frame->nb_samples;
+    // m_pTmpFrame->nb_samples 始终是分配时的容量；m_pFrame->nb_samples 上次可能被改小，先恢复
+    ost->m_pFrame->nb_samples = ost->m_pTmpFrame->nb_samples;
+    /* 编码器可能仍持有上一帧的引用，写入前确保可写 */
+    if (av_frame_make_writable(ost->m_pFrame) < 0) {
+        LOGCATE("MediaRecorder::EncodeAudioSamples Error while av_frame_make_writable");
+        return -1;
     }
 
-    if((m_AudioFrameQueue.Empty() && m_Exit) || ost->m_EncodeEnd) frame = nullptr;
-
-    if (frame) {
-        /* convert samples from native format to destination codec format, using the resampler */
-        /* compute destination number of samples */
-        dst_nb_samples = av_rescale_rnd(swr_get_delay(ost->m_pSwrCtx, c->sample_rate) + frame->nb_samples,
-                                        c->sample_rate, c->sample_rate, AV_ROUND_UP);
-        av_assert0(dst_nb_samples == frame->nb_samples);
-
-        /* when we pass a frame to the encoder, it may keep a reference to it
-         * internally;
-         * make sure we do not overwrite it here
-         */
-        ret = av_frame_make_writable(ost->m_pFrame);
-        if (ret < 0) {
-            LOGCATE("MediaRecorder::EncodeAudioFrame Error while av_frame_make_writable");
-            result = 1;
-            goto EXIT;
-        }
-
-        /* convert to destination format */
-        ret = swr_convert(ost->m_pSwrCtx,
-                          ost->m_pFrame->data, dst_nb_samples,
-                          (const uint8_t **)frame->data, frame->nb_samples);
-        LOGCATE("MediaRecorder::EncodeAudioFrame dst_nb_samples=%d, frame->nb_samples=%d", dst_nb_samples, frame->nb_samples);
-        if (ret < 0) {
-            LOGCATE("MediaRecorder::EncodeAudioFrame Error while converting");
-            result = 1;
-            goto EXIT;
-        }
-        frame = ost->m_pFrame;
-
-        frame->pts = av_rescale_q(ost->m_SamplesCount, (AVRational){1, c->sample_rate}, c->time_base);
-        ost->m_SamplesCount += dst_nb_samples;
+    // 采样率不变，输出采样数 = 输入采样数
+    int outSamples = swr_convert(ost->m_pSwrCtx, ost->m_pFrame->data, ost->m_pFrame->nb_samples,
+                                 (const uint8_t **) ost->m_pTmpFrame->data, readSamples);
+    if (outSamples <= 0) {
+        LOGCATE("MediaRecorder::EncodeAudioSamples Error while converting");
+        return -1;
     }
 
-    ret = avcodec_send_frame(c, frame);
-    if(ret == AVERROR_EOF) {
-        result = 1;
-        goto EXIT;
-    } else if(ret < 0) {
-        LOGCATE("MediaRecorder::EncodeAudioFrame audio avcodec_send_frame fail. ret=%s", av_err2str(ret));
-        result = 0;
-        goto EXIT;
-    }
+    // 帧长与 pts 都按实际采样数计算：pts 每帧增加 nb_samples（原来按 1 递增，时长全错）
+    ost->m_pFrame->nb_samples = outSamples;
+    ost->m_pFrame->pts = av_rescale_q(ost->m_SamplesCount, (AVRational){1, c->sample_rate}, c->time_base);
+    ost->m_SamplesCount += outSamples;
 
-    while(!ret) {
-        ret = avcodec_receive_packet(c, &pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            result = 0;
-            goto EXIT;
-        } else if (ret < 0) {
-            LOGCATE("MediaRecorder::EncodeAudioFrame audio avcodec_receive_packet fail. ret=%s", av_err2str(ret));
-            result = 0;
-            goto EXIT;
-        }
-        LOGCATE("MediaRecorder::EncodeAudioFrame pkt pts=%ld, size=%d", pkt.pts, pkt.size);
-        int result = WritePacket(m_FormatCtx, &c->time_base, ost->m_pStream, &pkt);
-        if (result < 0) {
-            LOGCATE("MediaRecorder::EncodeAudioFrame audio Error while writing audio frame: %s",
-                    av_err2str(ret));
-            result = 0;
-            goto EXIT;
-        }
-    }
-
-EXIT:
-    if(audioFrame) delete audioFrame;
-    return result;
+    return EncodeAndWrite(ost, ost->m_pFrame);
 }
 
 AVFrame *MediaRecorder::AllocVideoFrame(AVPixelFormat pix_fmt, int width, int height) {
-    LOGCATE("MediaRecorder::AllocVideoFrame");
-    AVFrame *picture;
-    int ret;
-
-    picture = av_frame_alloc();
+    AVFrame *picture = av_frame_alloc();
     if (!picture)
         return nullptr;
 
@@ -568,23 +527,22 @@ AVFrame *MediaRecorder::AllocVideoFrame(AVPixelFormat pix_fmt, int width, int he
     picture->width  = width;
     picture->height = height;
 
-    /* allocate the buffers for the frame data */
-    ret = av_frame_get_buffer(picture, 1);
-    if (ret < 0) {
+    /* allocate the buffers for the frame data（align=0 由 FFmpeg 选择适合 SIMD 的对齐） */
+    if (av_frame_get_buffer(picture, 0) < 0) {
         LOGCATE("MediaRecorder::AllocVideoFrame Could not allocate frame data.");
+        av_frame_free(&picture);
         return nullptr;
     }
 
     return picture;
 }
 
-int MediaRecorder::OpenVideo(AVFormatContext *oc, AVCodec *codec, AVOutputStream *ost) {
+int MediaRecorder::OpenVideo(AVCodec *codec, AVOutputStream *ost) {
     LOGCATE("MediaRecorder::OpenVideo");
-    int ret;
     AVCodecContext *c = ost->m_pCodecCtx;
 
     /* open the codec */
-    ret = avcodec_open2(c, codec, nullptr);
+    int ret = avcodec_open2(c, codec, nullptr);
     if (ret < 0) {
         LOGCATE("MediaRecorder::OpenVideo Could not open video codec: %s", av_err2str(ret));
         return -1;
@@ -592,13 +550,12 @@ int MediaRecorder::OpenVideo(AVFormatContext *oc, AVCodec *codec, AVOutputStream
 
     /* allocate and init a re-usable frame */
     ost->m_pFrame = AllocVideoFrame(c->pix_fmt, c->width, c->height);
-    ost->m_pTmpFrame = av_frame_alloc();
     if (!ost->m_pFrame) {
         LOGCATE("MediaRecorder::OpenVideo Could not allocate video frame");
         return -1;
     }
 
-    /* copy the stream parameters to the muxer */
+    /* 编码器打开之后再拷贝参数，此时 extradata（SPS/PPS）才已生成 */
     ret = avcodec_parameters_from_context(ost->m_pStream->codecpar, c);
     if (ret < 0) {
         LOGCATE("MediaRecorder::OpenVideo Could not copy the stream parameters");
@@ -607,167 +564,50 @@ int MediaRecorder::OpenVideo(AVFormatContext *oc, AVCodec *codec, AVOutputStream
     return 0;
 }
 
-int MediaRecorder::EncodeVideoFrame(AVOutputStream *ost) {
-    LOGCATE("MediaRecorder::EncodeVideoFrame");
-    int result = 0;
-    int ret;
-    AVCodecContext *c;
-    AVFrame *frame;
-    AVPacket pkt = { 0 };
+int MediaRecorder::EncodeVideoFrame(VideoFrame *videoFrame) {
+    AVOutputStream *ost = &m_VideoStream;
+    AVCodecContext *c = ost->m_pCodecCtx;
 
-    c = ost->m_pCodecCtx;
-
-    av_init_packet(&pkt);
-
-    while (m_VideoFrameQueue.Empty() && !m_Exit) {
-
-        usleep(10* 1000);
+    AVPixelFormat srcPixFmt = ToAVPixelFormat(videoFrame->format);
+    if (srcPixFmt == AV_PIX_FMT_NONE) {
+        LOGCATE("MediaRecorder::EncodeVideoFrame unSupport format pImage->format=%d", videoFrame->format);
+        return -1;
     }
 
-    frame = ost->m_pTmpFrame;
-    AVPixelFormat srcPixFmt = AV_PIX_FMT_YUV420P;
-    VideoFrame *videoFrame = m_VideoFrameQueue.Pop();
-    if(videoFrame) {
-        frame->data[0] = videoFrame->ppPlane[0];
-        frame->data[1] = videoFrame->ppPlane[1];
-        frame->data[2] = videoFrame->ppPlane[2];
-        frame->linesize[0] = videoFrame->pLineSize[0];
-        frame->linesize[1] = videoFrame->pLineSize[1];
-        frame->linesize[2] = videoFrame->pLineSize[2];
-        frame->width = videoFrame->width;
-        frame->height = videoFrame->height;
-        switch (videoFrame->format) {
-            case IMAGE_FORMAT_RGBA:
-                srcPixFmt = AV_PIX_FMT_RGBA;
-                break;
-            case IMAGE_FORMAT_NV21:
-                srcPixFmt = AV_PIX_FMT_NV21;
-                break;
-            case IMAGE_FORMAT_NV12:
-                srcPixFmt = AV_PIX_FMT_NV12;
-                break;
-            case IMAGE_FORMAT_I420:
-                srcPixFmt = AV_PIX_FMT_YUV420P;
-                break;
-            default:
-                LOGCATE("MediaRecorder::EncodeVideoFrame unSupport format pImage->format=%d", videoFrame->format);
-                break;
-        }
+    /* 编码器可能仍持有上一帧的引用，写入前确保可写 */
+    if (av_frame_make_writable(ost->m_pFrame) < 0) return -1;
+
+    // 统一用 sws 转换到编码器格式和尺寸：
+    // 源尺寸取自帧本身（不是编码器尺寸），I420 输入也会被正确拷贝（原来 I420 分支什么都没写进去）
+    ost->m_pSwsCtx = sws_getCachedContext(ost->m_pSwsCtx,
+                                          videoFrame->width, videoFrame->height, srcPixFmt,
+                                          c->width, c->height, c->pix_fmt,
+                                          SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+    if (!ost->m_pSwsCtx) {
+        LOGCATE("MediaRecorder::EncodeVideoFrame Could not initialize the conversion context");
+        return -1;
     }
+    // sws_scale 内部按 4 个平面读取，NativeImage 只有 3 个，先拷到 4 元素数组避免越界读
+    const uint8_t *srcData[4] = {videoFrame->ppPlane[0], videoFrame->ppPlane[1], videoFrame->ppPlane[2], nullptr};
+    int srcLineSize[4] = {videoFrame->pLineSize[0], videoFrame->pLineSize[1], videoFrame->pLineSize[2], 0};
+    sws_scale(ost->m_pSwsCtx, srcData, srcLineSize, 0, videoFrame->height,
+              ost->m_pFrame->data, ost->m_pFrame->linesize);
 
-    if((m_VideoFrameQueue.Empty() && m_Exit) || ost->m_EncodeEnd) frame = nullptr;
+    // pts 使用采集时间（毫秒），并保证严格递增
+    int64_t pts = videoFrame->timestamp;
+    if (pts <= ost->m_LastPts) pts = ost->m_LastPts + 1;
+    ost->m_LastPts = pts;
+    ost->m_pFrame->pts = pts;
 
-    if(frame != nullptr) {
-    /* when we pass a frame to the encoder, it may keep a reference to it
-    * internally; make sure we do not overwrite it here */
-        if (av_frame_make_writable(ost->m_pFrame) < 0) {
-            result = 1;
-            goto EXIT;
-        }
-
-        if (srcPixFmt != AV_PIX_FMT_YUV420P) {
-            /* as we only generate a YUV420P picture, we must convert it
-             * to the codec pixel format if needed */
-            if (!ost->m_pSwsCtx) {
-                ost->m_pSwsCtx = sws_getContext(c->width, c->height,
-                                                srcPixFmt,
-                                              c->width, c->height,
-                                              c->pix_fmt,
-                                              SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-                if (!ost->m_pSwsCtx) {
-                    LOGCATE("MediaRecorder::EncodeVideoFrame Could not initialize the conversion context\n");
-                    result = 1;
-                    goto EXIT;
-                }
-            }
-            sws_scale(ost->m_pSwsCtx, (const uint8_t * const *) frame->data,
-                      frame->linesize, 0, c->height, ost->m_pFrame->data,
-                      ost->m_pFrame->linesize);
-        }
-        ost->m_pFrame->pts = ost->m_NextPts++;
-        frame = ost->m_pFrame;
-    }
-
-//    if(frame) {
-//        NativeImage i420;
-//        i420.format = IMAGE_FORMAT_I420;
-//        i420.width = frame->width;
-//        i420.height = frame->height;
-//        i420.ppPlane[0] = frame->data[0];
-//        i420.ppPlane[1] = frame->data[1];
-//        i420.ppPlane[2] = frame->data[2];
-//        i420.pLineSize[0] = frame->linesize[0];
-//        i420.pLineSize[1] = frame->linesize[1];
-//        i420.pLineSize[2] = frame->linesize[2];
-//        NativeImageUtil::DumpNativeImage(&i420, "/sdcard/DCIM", "media");
-//    }
-
-    /* encode the image */
-    ret = avcodec_send_frame(c, frame);
-    if(ret == AVERROR_EOF) {
-        result = 1;
-        goto EXIT;
-    } else if(ret < 0) {
-        LOGCATE("MediaRecorder::EncodeVideoFrame video avcodec_send_frame fail. ret=%s", av_err2str(ret));
-        result = 0;
-        goto EXIT;
-    }
-
-    while(!ret) {
-        ret = avcodec_receive_packet(c, &pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            result = 0;
-            goto EXIT;
-        } else if (ret < 0) {
-            LOGCATE("MediaRecorder::EncodeVideoFrame video avcodec_receive_packet fail. ret=%s", av_err2str(ret));
-            result = 0;
-            goto EXIT;
-        }
-        LOGCATE("MediaRecorder::EncodeVideoFrame video pkt pts=%ld, size=%d", pkt.pts, pkt.size);
-        int result = WritePacket(m_FormatCtx, &c->time_base, ost->m_pStream, &pkt);
-        if (result < 0) {
-            LOGCATE("MediaRecorder::EncodeVideoFrame video Error while writing audio frame: %s",
-                    av_err2str(ret));
-            result = 0;
-            goto EXIT;
-        }
-    }
-
-EXIT:
-    NativeImageUtil::FreeNativeImage(videoFrame);
-    if(videoFrame) delete videoFrame;
-    return result;
+    return EncodeAndWrite(ost, ost->m_pFrame);
 }
 
 void MediaRecorder::CloseStream(AVOutputStream *ost) {
     avcodec_free_context(&ost->m_pCodecCtx);
     av_frame_free(&ost->m_pFrame);
+    // AVFrame 必须用 av_frame_free 释放（原来用 av_free 会泄漏其中的缓冲区）
+    av_frame_free(&ost->m_pTmpFrame);
     sws_freeContext(ost->m_pSwsCtx);
+    ost->m_pSwsCtx = nullptr;
     swr_free(&ost->m_pSwrCtx);
-    if(ost->m_pTmpFrame != nullptr) {
-        av_free(ost->m_pTmpFrame);
-        ost->m_pTmpFrame = nullptr;
-    }
-
-}
-
-void MediaRecorder::StartMediaEncodeThread(MediaRecorder *recorder) {
-    LOGCATE("MediaRecorder::StartMediaEncodeThread start");
-    AVOutputStream *vOs = &recorder->m_VideoStream;
-    AVOutputStream *aOs = &recorder->m_AudioStream;
-    while (!vOs->m_EncodeEnd || !aOs->m_EncodeEnd) {
-        double videoTimestamp = vOs->m_NextPts * av_q2d(vOs->m_pCodecCtx->time_base);
-        double audioTimestamp = aOs->m_NextPts * av_q2d(aOs->m_pCodecCtx->time_base);
-        LOGCATE("MediaRecorder::StartVideoEncodeThread [videoTimestamp, audioTimestamp]=[%lf, %lf]", videoTimestamp, audioTimestamp);
-        if (!vOs->m_EncodeEnd &&
-            (aOs->m_EncodeEnd || av_compare_ts(vOs->m_NextPts, vOs->m_pCodecCtx->time_base,
-                                               aOs->m_NextPts, aOs->m_pCodecCtx->time_base) <= 0)) {
-            //视频和音频时间戳对齐，人对于声音比较敏感，防止出现视频声音播放结束画面还没结束的情况
-            if(audioTimestamp <= videoTimestamp && aOs->m_EncodeEnd) vOs->m_EncodeEnd = 1;
-            vOs->m_EncodeEnd = recorder->EncodeVideoFrame(vOs);
-        } else {
-            aOs->m_EncodeEnd = recorder->EncodeAudioFrame(aOs);
-        }
-    }
-    LOGCATE("MediaRecorder::StartVideoEncodeThread end");
 }

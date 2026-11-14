@@ -26,7 +26,11 @@ MediaRecorderContext::MediaRecorderContext() {
  */
 MediaRecorderContext::~MediaRecorderContext()
 {
-	GLCameraRender::ReleaseInstance();
+	// 先停掉可能还在进行的录制（写完文件尾）
+	StopRecord();
+	// 不删除相机渲染器单例：GL 线程可能仍在调用它（会导致释放后使用），只清理它持有的数据
+	GLCameraRender::GetInstance()->SetRenderCallback(nullptr, nullptr);
+	GLCameraRender::GetInstance()->UnInit();
 }
 
 /**
@@ -108,7 +112,6 @@ void MediaRecorderContext::DeleteContext(JNIEnv *env, jobject instance)
  */
 MediaRecorderContext *MediaRecorderContext::GetContext(JNIEnv *env, jobject instance)
 {
-	LOGCATE("MediaRecorderContext::GetContext");
 
 	if (s_ContextHandle == NULL)
 	{
@@ -163,90 +166,126 @@ int
 MediaRecorderContext::StartRecord(int recorderType, const char *outUrl, int frameWidth, int frameHeight, long videoBitRate,
                                   int fps) {
 	LOGCATE("MediaRecorderContext::StartRecord recorderType=%d, outUrl=%s, [w,h]=[%d,%d], videoBitRate=%ld, fps=%d", recorderType, outUrl, frameWidth, frameHeight, videoBitRate, fps);
-	std::unique_lock<std::mutex> lock(m_mutex);
+	int result = -1;
+	// 创建和启动录制器（打开编码器、写文件头）比较耗时，放在锁外进行，成功后才挂到成员上
 	switch (recorderType) {
-		case RECORDER_TYPE_SINGLE_VIDEO:  // 单视频录制
-			if(m_pVideoRecorder == nullptr) {
-				m_pVideoRecorder = new SingleVideoRecorder(outUrl, frameHeight, frameWidth, videoBitRate, fps);
-				m_pVideoRecorder->StartRecord();
+		case RECORDER_TYPE_SINGLE_VIDEO: {  // 单视频录制
+			if(GetVideoRecorder() != nullptr) return 0;
+			// 相机图像是横向的，预览/录制时旋转了 90 度，所以宽高互换
+			auto recorder = std::make_shared<SingleVideoRecorder>(outUrl, frameHeight, frameWidth, videoBitRate, fps);
+			result = recorder->StartRecord();
+			if(result == 0) {
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_pVideoRecorder = recorder;
 			}
 			break;
-		case RECORDER_TYPE_SINGLE_AUDIO:  // 单音频录制
-			if(m_pAudioRecorder == nullptr) {
-				m_pAudioRecorder = new SingleAudioRecorder(outUrl, DEFAULT_SAMPLE_RATE, AV_CH_LAYOUT_STEREO, AV_SAMPLE_FMT_S16);
-				m_pAudioRecorder->StartRecord();
+		}
+		case RECORDER_TYPE_SINGLE_AUDIO: {  // 单音频录制
+			if(GetAudioRecorder() != nullptr) return 0;
+			auto recorder = std::make_shared<SingleAudioRecorder>(outUrl, DEFAULT_SAMPLE_RATE, AV_CH_LAYOUT_STEREO, AV_SAMPLE_FMT_S16);
+			result = recorder->StartRecord();
+			if(result == 0) {
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_pAudioRecorder = recorder;
 			}
 			break;
-		case RECORDER_TYPE_AV:  // 音视频同时录制
-			if(m_pAVRecorder == nullptr) {
-				RecorderParam param = {0};
-				param.frameWidth      = frameHeight;
-				param.frameHeight     = frameWidth;
-				param.videoBitRate    = videoBitRate;
-				param.fps             = fps;
-				param.audioSampleRate = DEFAULT_SAMPLE_RATE;
-				param.channelLayout   = AV_CH_LAYOUT_STEREO;
-				param.sampleFormat    = AV_SAMPLE_FMT_S16;
-				m_pAVRecorder = new MediaRecorder(outUrl, &param);
-				m_pAVRecorder->StartRecord();
+		}
+		case RECORDER_TYPE_AV: {  // 音视频同时录制
+			if(GetAVRecorder() != nullptr) return 0;
+			RecorderParam param = {0};
+			param.frameWidth      = frameHeight;
+			param.frameHeight     = frameWidth;
+			param.videoBitRate    = videoBitRate;
+			param.fps             = fps;
+			param.audioSampleRate = DEFAULT_SAMPLE_RATE;
+			param.channelLayout   = AV_CH_LAYOUT_STEREO;
+			param.sampleFormat    = AV_SAMPLE_FMT_S16;
+			auto recorder = std::make_shared<MediaRecorder>(outUrl, &param);
+			result = recorder->StartRecord();
+			if(result == 0) {
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_pAVRecorder = recorder;
 			}
 			break;
+		}
 		default:
 			break;
 	}
 
-
-    return 0;
+	if(result != 0) {
+		LOGCATE("MediaRecorderContext::StartRecord fail, result=%d", result);
+	}
+	// 只有录制视频时才需要从 GPU 回读画面（glReadPixels 很贵，原来不录制时每帧也在读）
+	UpdateReadbackState();
+	return result;
 }
 
 /**
  * @brief 停止录制
  * @return 0表示成功
  *
- * 停止所有活动的录制器并释放资源
+ * 锁内只把录制器指针取出来，等待编码线程、写文件尾这些耗时操作都在锁外完成：
+ * 原来整个过程都持有锁，期间 GL 线程的录制回调被卡住，预览画面冻结
  */
 int MediaRecorderContext::StopRecord() {
-	std::unique_lock<std::mutex> lock(m_mutex);
-	// 停止单视频录制
-	if(m_pVideoRecorder != nullptr) {
-        m_pVideoRecorder->StopRecord();
-        delete m_pVideoRecorder;
-        m_pVideoRecorder = nullptr;
-    }
-
-	// 停止单音频录制
-	if(m_pAudioRecorder != nullptr) {
-		m_pAudioRecorder->StopRecord();
-		delete m_pAudioRecorder;
-		m_pAudioRecorder = nullptr;
+	std::shared_ptr<SingleVideoRecorder> videoRecorder;
+	std::shared_ptr<SingleAudioRecorder> audioRecorder;
+	std::shared_ptr<MediaRecorder> avRecorder;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		videoRecorder.swap(m_pVideoRecorder);
+		audioRecorder.swap(m_pAudioRecorder);
+		avRecorder.swap(m_pAVRecorder);
 	}
+	UpdateReadbackState();
 
-	// 停止音视频录制
-	if(m_pAVRecorder != nullptr) {
-		m_pAVRecorder->StopRecord();
-		delete m_pAVRecorder;
-		m_pAVRecorder = nullptr;
+	if(videoRecorder) videoRecorder->StopRecord();
+	if(audioRecorder) audioRecorder->StopRecord();
+	if(avRecorder) avRecorder->StopRecord();
+	// 离开作用域时，若回调线程已用完，录制器在这里析构
+	return 0;
+}
+
+void MediaRecorderContext::UpdateReadbackState() {
+	bool needVideo;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		needVideo = m_pVideoRecorder != nullptr || m_pAVRecorder != nullptr;
 	}
-    return 0;
+	GLCameraRender::GetInstance()->SetReadbackEnabled(needVideo);
+}
+
+std::shared_ptr<SingleVideoRecorder> MediaRecorderContext::GetVideoRecorder() {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_pVideoRecorder;
+}
+
+std::shared_ptr<SingleAudioRecorder> MediaRecorderContext::GetAudioRecorder() {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_pAudioRecorder;
+}
+
+std::shared_ptr<MediaRecorder> MediaRecorderContext::GetAVRecorder() {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_pAVRecorder;
 }
 
 /**
- * @brief 接收音频数据
+ * @brief 接收音频数据（AudioRecord 线程调用）
  * @param pData 音频数据指针
  * @param size 数据大小
- *
- * 将音频数据传递给活动的音频录制器
  */
 void MediaRecorderContext::OnAudioData(uint8_t *pData, int size) {
-    LOGCATE("MediaRecorderContext::OnAudioData pData=%p, dataSize=%d", pData, size);
-    AudioFrame audioFrame(pData, size, false);
-    // 传递给单音频录制器
-    if(m_pAudioRecorder != nullptr)
-		m_pAudioRecorder->OnFrame2Encode(&audioFrame);
+    LOGCATV("MediaRecorderContext::OnAudioData pData=%p, dataSize=%d", pData, size);
+    // 原来这里不加锁，StopRecord 同时 delete 录制器会导致释放后使用。
+    // 现在锁内复制 shared_ptr、锁外使用：即使此时 StopRecord，对象也会等这里用完才析构
+    std::shared_ptr<SingleAudioRecorder> audioRecorder = GetAudioRecorder();
+    std::shared_ptr<MediaRecorder> avRecorder = GetAVRecorder();
+    if(!audioRecorder && !avRecorder) return;
 
-    // 传递给音视频录制器
-    if(m_pAVRecorder != nullptr)
-    	m_pAVRecorder->OnFrame2Encode(&audioFrame);
+    AudioFrame audioFrame(pData, size, false);
+    if(audioRecorder) audioRecorder->OnFrame2Encode(&audioFrame);
+    if(avRecorder) avRecorder->OnFrame2Encode(&audioFrame);
 }
 
 /**
@@ -260,7 +299,7 @@ void MediaRecorderContext::OnAudioData(uint8_t *pData, int size) {
  */
 void MediaRecorderContext::OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height)
 {
-	LOGCATE("MediaRecorderContext::UpdateFrame format=%d, width=%d, height=%d, pData=%p",
+	LOGCATV("MediaRecorderContext::UpdateFrame format=%d, width=%d, height=%d, pData=%p",
 			format, width, height, pBuffer);
 	// 构造NativeImage结构
 	NativeImage nativeImage;
@@ -360,16 +399,15 @@ void MediaRecorderContext::OnDrawFrame()
  * 将渲染后的帧传递给录制器进行编码
  */
 void MediaRecorderContext::OnGLRenderFrame(void *ctx, NativeImage *pImage) {
-	LOGCATE("MediaRecorderContext::OnGLRenderFrame ctx=%p, pImage=%p", ctx, pImage);
+	LOGCATV("MediaRecorderContext::OnGLRenderFrame ctx=%p, pImage=%p", ctx, pImage);
 	MediaRecorderContext *context = static_cast<MediaRecorderContext *>(ctx);
-	std::unique_lock<std::mutex> lock(context->m_mutex);
+	// 锁内复制指针、锁外入队，GL 线程不会被 StartRecord/StopRecord 卡住
+	std::shared_ptr<SingleVideoRecorder> videoRecorder = context->GetVideoRecorder();
+	std::shared_ptr<MediaRecorder> avRecorder = context->GetAVRecorder();
 	// 传递给单视频录制器
-	if(context->m_pVideoRecorder != nullptr)
-		context->m_pVideoRecorder->OnFrame2Encode(pImage);
-
+	if(videoRecorder) videoRecorder->OnFrame2Encode(pImage);
 	// 传递给音视频录制器
-	if(context->m_pAVRecorder != nullptr)
-		context->m_pAVRecorder->OnFrame2Encode(pImage);
+	if(avRecorder) avRecorder->OnFrame2Encode(pImage);
 }
 
 /**

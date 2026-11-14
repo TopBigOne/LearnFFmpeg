@@ -10,6 +10,8 @@
 #define OPENGLCAMERA2_BYTEFLOWRENDERCONTEXT_H
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <jni.h>
 #include <SingleVideoRecorder.h>
 #include "VideoGLRender.h"
@@ -170,12 +172,21 @@ public:
 	void SetFragShader(int index, char *pShaderStr, int strSize);
 
 private:
+	/** 只有在录制视频时才开启 GPU 画面回读 */
+	void UpdateReadbackState();
+
+	std::shared_ptr<SingleVideoRecorder> GetVideoRecorder();
+	std::shared_ptr<SingleAudioRecorder> GetAudioRecorder();
+	std::shared_ptr<MediaRecorder> GetAVRecorder();
+
 	static jfieldID s_ContextHandle;            // JNI字段ID，用于存储Native上下文
 	TransformMatrix m_transformMatrix;          // 变换矩阵
-	SingleVideoRecorder *m_pVideoRecorder = nullptr;  // 单独视频录制器
-	SingleAudioRecorder *m_pAudioRecorder = nullptr;  // 单独音频录制器
-	MediaRecorder       *m_pAVRecorder    = nullptr;  // 音视频录制器
-	mutex m_mutex;                              // 互斥锁，保护共享数据
+	// 录制器用 shared_ptr 管理：回调线程在锁内复制一份指针、锁外使用，
+	// 停止录制时即使回调线程还在用，对象也要等它用完才会真正析构，不会出现释放后使用
+	std::shared_ptr<SingleVideoRecorder> m_pVideoRecorder;  // 单独视频录制器
+	std::shared_ptr<SingleAudioRecorder> m_pAudioRecorder;  // 单独音频录制器
+	std::shared_ptr<MediaRecorder>       m_pAVRecorder;     // 音视频录制器
+	mutex m_mutex;                              // 互斥锁，只保护上面三个指针本身，耗时操作都在锁外
 
 };
 

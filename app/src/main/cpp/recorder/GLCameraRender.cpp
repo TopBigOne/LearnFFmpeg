@@ -147,12 +147,13 @@ void GLCameraRender::Init(int videoWidth, int videoHeight, int *dstSize) {
  * 如果尺寸变化，重新分配缓冲区
  */
 void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
-    LOGCATE("GLCameraRender::RenderVideoFrame pImage=%p", pImage);
+    LOGCATV("GLCameraRender::RenderVideoFrame pImage=%p", pImage);
     if(pImage == nullptr || pImage->ppPlane[0] == nullptr)
         return;
     std::unique_lock<std::mutex> lock(m_Mutex);
-    // 检测尺寸变化，重新分配缓冲区
-    if (pImage->width != m_RenderImage.width || pImage->height != m_RenderImage.height) {
+    // 检测尺寸或格式变化，重新分配缓冲区
+    if (pImage->width != m_RenderImage.width || pImage->height != m_RenderImage.height
+        || pImage->format != m_RenderImage.format) {
         if (m_RenderImage.ppPlane[0] != nullptr) {
             NativeImageUtil::FreeNativeImage(&m_RenderImage);
         }
@@ -172,13 +173,27 @@ void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
  * 释放扩展图像和着色器缓冲区资源
  */
 void GLCameraRender::UnInit() {
-    NativeImageUtil::FreeNativeImage(&m_ExtImage);
-
-    if(m_pFragShaderBuffer != nullptr) {
-        free(m_pFragShaderBuffer);
-        m_pFragShaderBuffer = nullptr;
+    {
+        // 图像数据会被 GL 线程读取，在锁内释放（原来不加锁）
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        NativeImageUtil::FreeNativeImage(&m_ExtImage);
+        memset(&m_ExtImage, 0, sizeof(NativeImage));
+        NativeImageUtil::FreeNativeImage(&m_RenderImage);
+        memset(&m_RenderImage, 0, sizeof(NativeImage));
+        m_ExtImageChanged = false;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_ShaderMutex);
+        if(m_pFragShaderBuffer != nullptr) {
+            free(m_pFragShaderBuffer);
+            m_pFragShaderBuffer = nullptr;
+        }
+        m_IsShaderChanged = false;
+        m_ShaderIndex = 0;
+    }
+    m_ReadbackBuffer.clear();
+    m_ReadbackBuffer.shrink_to_fit();
 }
 
 /**
@@ -228,8 +243,13 @@ void GLCameraRender::UpdateMVPMatrix(int angleX, int angleY, float scaleX, float
  * 根据完整的变换参数计算MVP矩阵，支持镜像和任意角度旋转
  */
 void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
-    //BaseGLRender::UpdateMVPMatrix(pTransformMatrix);
+    // JNI 线程调用：只保存参数（加锁），矩阵在 GL 线程绘制时计算，避免两个线程同时读写
+    std::lock_guard<std::mutex> lock(m_Mutex);
     m_transformMatrix = *pTransformMatrix;
+}
+
+void GLCameraRender::ApplyTransformMatrix(const TransformMatrix &transform) {
+    const TransformMatrix *pTransformMatrix = &transform;
 
     //转化为弧度角
     float radiansX = static_cast<float>(MATH_PI / 180.0f * pTransformMatrix->angleX);
@@ -298,9 +318,27 @@ void GLCameraRender::UpdateMVPMatrix(TransformMatrix *pTransformMatrix) {
 void GLCameraRender::OnSurfaceCreated() {
     LOGCATE("GLCameraRender::OnSurfaceCreated");
 
+    // 单例会跨越多个 GLSurfaceView 存活，每次 OnSurfaceCreated 都是新的 EGL 上下文：
+    // 旧上下文的对象已随上下文销毁，ID 必须清零，否则 FBO 等不会重建，画面黑屏
+    m_SrcFboId = m_DstFboId = GL_NONE;
+    m_SrcFboTextureId = m_DstFboTextureId = GL_NONE;
+    m_ExtTextureId = GL_NONE;
+    m_FboWidth = m_FboHeight = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_ExtImageChanged = m_ExtImage.ppPlane[0] != nullptr;   // LUT 纹理需要重新上传
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);   // 色度平面行宽不一定是 4 的倍数
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
     // 创建两个着色器程序：一个用于屏幕显示，一个用于FBO离屏渲染
     m_ProgramObj = GLUtils::CreateProgram(vShaderStr, fShaderStr);
     m_FboProgramObj = GLUtils::CreateProgram(vShaderStr, fShaderStr);
+    {
+        // 之前选过滤镜：在新的上下文里重新编译滤镜程序
+        std::lock_guard<std::mutex> lock(m_ShaderMutex);
+        if(m_pFragShaderBuffer != nullptr) m_IsShaderChanged = true;
+    }
     if (!m_ProgramObj || !m_FboProgramObj)
     {
         LOGCATE("GLCameraRender::OnSurfaceCreated create program fail");
@@ -374,99 +412,95 @@ void GLCameraRender::OnSurfaceChanged(int w, int h) {
  * 2. 渲染到FBO2（调整方向）
  * 3. 渲染到屏幕
  */
-void GLCameraRender::OnDrawFrame() {
-    // 如果着色器发生变化，重新创建FBO程序
-    if(m_IsShaderChanged) {
-        unique_lock<mutex> lock(m_ShaderMutex);
-        GLUtils::DeleteProgram(m_FboProgramObj);
-        m_FboProgramObj = GLUtils::CreateProgram(vShaderStr, m_pFragShaderBuffer);
-        m_IsShaderChanged = false;
-    }
+static void UploadPlane(GLuint texId, GLenum unit, GLenum format, int w, int h, const void *data) {
+    glActiveTexture(unit);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, GL_NONE);
+}
 
-    glClear(GL_COLOR_BUFFER_BIT);
-    if(m_ProgramObj == GL_NONE || m_RenderImage.ppPlane[0] == nullptr) return;
-    if(m_SrcFboId == GL_NONE && CreateFrameBufferObj()) {
-        LOGCATE("GLCameraRender::OnDrawFrame CreateFrameBufferObj fail");
-        return;
-    }
-    LOGCATE("GLCameraRender::OnDrawFrame [w, h]=[%d, %d], format=%d", m_RenderImage.width, m_RenderImage.height, m_RenderImage.format);
-    m_FrameIndex++;
-
-    // 更新扩展纹理（如LUT滤镜纹理）
-    UpdateExtTexture();
-
-    std::unique_lock<std::mutex> lock(m_Mutex);
-    // 第一步：渲染到 FBO（应用滤镜效果）
-    glBindFramebuffer(GL_FRAMEBUFFER, m_SrcFboId);
-    glViewport(0, 0, m_RenderImage.height, m_RenderImage.width); //相机的宽和高反了
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(m_FboProgramObj);
-    // 上传图像数据到纹理
-
-    glBindTexture(GL_TEXTURE_2D, m_SrcFboTextureId);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-    glBindTexture(GL_TEXTURE_2D, m_DstFboTextureId);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-    // 根据图像格式上传纹理数据
+void GLCameraRender::UploadTextures() {
+    int w = m_RenderImage.width;
+    int h = m_RenderImage.height;
     switch (m_RenderImage.format)
     {
         case IMAGE_FORMAT_RGBA:
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.width, m_RenderImage.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_RGBA, w, h, m_RenderImage.ppPlane[0]);
             break;
         case IMAGE_FORMAT_NV21:
         case IMAGE_FORMAT_NV12:
             //upload Y plane data
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width,
-                         m_RenderImage.height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_LUMINANCE, w, h, m_RenderImage.ppPlane[0]);
             //update UV plane data
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[1]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[1]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[1], GL_TEXTURE1, GL_LUMINANCE_ALPHA, w >> 1, h >> 1, m_RenderImage.ppPlane[1]);
             break;
         case IMAGE_FORMAT_I420:
             //upload Y plane data
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[0]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width,
-                         m_RenderImage.height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[0]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
+            UploadPlane(m_TextureIds[0], GL_TEXTURE0, GL_LUMINANCE, w, h, m_RenderImage.ppPlane[0]);
             //update U plane data
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[1]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[1]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
-
+            UploadPlane(m_TextureIds[1], GL_TEXTURE1, GL_LUMINANCE, w >> 1, h >> 1, m_RenderImage.ppPlane[1]);
             //update V plane data
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, m_TextureIds[2]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, m_RenderImage.width >> 1,
-                         m_RenderImage.height >> 1, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                         m_RenderImage.ppPlane[2]);
-            glBindTexture(GL_TEXTURE_2D, GL_NONE);
+            UploadPlane(m_TextureIds[2], GL_TEXTURE2, GL_LUMINANCE, w >> 1, h >> 1, m_RenderImage.ppPlane[2]);
             break;
         default:
             break;
     }
+}
+
+void GLCameraRender::OnDrawFrame() {
+    // 如果着色器发生变化，重新创建FBO程序
+    if(m_IsShaderChanged) {
+        unique_lock<mutex> lock(m_ShaderMutex);
+        if(m_pFragShaderBuffer != nullptr) {
+            GLUtils::DeleteProgram(m_FboProgramObj);
+            m_FboProgramObj = GLUtils::CreateProgram(vShaderStr, m_pFragShaderBuffer);
+        }
+        m_IsShaderChanged = false;
+    }
+
+    glClear(GL_COLOR_BUFFER_BIT);
+    if(m_ProgramObj == GL_NONE || m_FboProgramObj == GL_NONE) return;
+
+    // ---- 锁内：读取共享数据、上传纹理（这些数据会被相机线程/JNI 线程改写）----
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    if(m_RenderImage.ppPlane[0] == nullptr) return;
+    int imageWidth = m_RenderImage.width;
+    int imageHeight = m_RenderImage.height;
+    // 相机图像是横向的，经过旋转后输出尺寸宽高互换
+    int outWidth = imageHeight;
+    int outHeight = imageWidth;
+
+    // 原来写成 `== GL_NONE && CreateFrameBufferObj()`：创建成功反而 return，失败却继续画，条件反了
+    if(m_SrcFboId == GL_NONE && !CreateFrameBufferObj()) {
+        LOGCATE("GLCameraRender::OnDrawFrame CreateFrameBufferObj fail");
+        return;
+    }
+    // FBO 纹理只在尺寸变化时重新分配
+    UpdateFboTextureSize(outWidth, outHeight);
+
+    LOGCATV("GLCameraRender::OnDrawFrame [w, h]=[%d, %d], format=%d", imageWidth, imageHeight, m_RenderImage.format);
+    m_FrameIndex++;
+
+    // 更新扩展纹理（如LUT滤镜纹理）：在锁内进行，SetLUTImage 可能同时在释放/重新分配它（原来在锁外，会读到已释放的内存）
+    UpdateExtTexture();
+    int extWidth = m_ExtImage.width;
+    int extHeight = m_ExtImage.height;
+
+    // 上传相机图像到纹理
+    UploadTextures();
+    int imageFormat = m_RenderImage.format;
+    TransformMatrix transform = m_transformMatrix;
+    lock.unlock();
+    // ---- 以下只使用局部副本和 GL 对象，不再持有锁 ----
+
+    // 第一步：渲染到 FBO（应用滤镜效果）
+    glBindFramebuffer(GL_FRAMEBUFFER, m_SrcFboId);
+    glViewport(0, 0, outWidth, outHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_FboProgramObj);
 
     glBindVertexArray(m_VaoId);
-    UpdateMVPMatrix(&m_transformMatrix);
+    ApplyTransformMatrix(transform);
     GLUtils::setMat4(m_FboProgramObj, "u_MVPMatrix", m_MVPMatrix);
     for (int i = 0; i < TEXTURE_NUM; ++i) {
         glActiveTexture(GL_TEXTURE0 + i);
@@ -477,10 +511,10 @@ void GLCameraRender::OnDrawFrame() {
     }
     float offset = (sin(m_FrameIndex * MATH_PI / 40) + 1.0f) / 2.0f;
     GLUtils::setFloat(m_FboProgramObj, "u_Offset", offset);
-    GLUtils::setVec2(m_FboProgramObj, "u_TexSize", vec2(m_RenderImage.width, m_RenderImage.height));
-    GLUtils::setInt(m_FboProgramObj, "u_nImgType", m_RenderImage.format);
+    GLUtils::setVec2(m_FboProgramObj, "u_TexSize", vec2(imageWidth, imageHeight));
+    GLUtils::setInt(m_FboProgramObj, "u_nImgType", imageFormat);
 
-    switch (m_ShaderIndex) {
+    switch (m_ShaderIndex.load()) {
         case SHADER_INDEX_ORIGIN:
             break;
         case SHADER_INDEX_DMESH:
@@ -496,7 +530,7 @@ void GLCameraRender::OnDrawFrame() {
             glActiveTexture(GL_TEXTURE0 + TEXTURE_NUM);
             glBindTexture(GL_TEXTURE_2D, m_ExtTextureId);
             GLUtils::setInt(m_FboProgramObj, "s_textureMapping", TEXTURE_NUM);
-            GLUtils::setVec2(m_FboProgramObj, "asciiTexSize", vec2(m_ExtImage.width, m_ExtImage.height));
+            GLUtils::setVec2(m_FboProgramObj, "asciiTexSize", vec2(extWidth, extHeight));
             break;
         case SHADER_INDEX_LUT_A:
         case SHADER_INDEX_LUT_B:
@@ -518,7 +552,7 @@ void GLCameraRender::OnDrawFrame() {
 
     // 第二步：再绘制一次到第二个FBO，调整方向
     glBindFramebuffer(GL_FRAMEBUFFER, m_DstFboId);
-    glViewport(0, 0, m_RenderImage.height, m_RenderImage.width); //相机的宽和高反了,
+    glViewport(0, 0, outWidth, outHeight);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram (m_ProgramObj);
     glBindVertexArray(m_VaoId);
@@ -532,16 +566,14 @@ void GLCameraRender::OnDrawFrame() {
     GLUtils::setInt(m_ProgramObj, "u_nImgType", IMAGE_FORMAT_RGBA);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
 
-    // 从FBO读取渲染结果，用于录制
-    GetRenderFrameFromFBO();
+    // 从FBO读取渲染结果，用于录制（仅录制时）。此时不持有图像锁，录制模块的回调不会卡住相机线程
+    GetRenderFrameFromFBO(outWidth, outHeight);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    lock.unlock();
 
     // 第三步：渲染到屏幕
     glViewport(0, 0, m_ScreenSize.x, m_ScreenSize.y);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    UpdateMVPMatrix(0, 0, 1.0, 1.0);
     GLUtils::setMat4(m_ProgramObj, "u_MVPMatrix", m_MVPMatrix);
 
     glActiveTexture(GL_TEXTURE0);
@@ -559,14 +591,11 @@ void GLCameraRender::OnDrawFrame() {
  * 线程安全的单例模式实现（双重检查锁定）
  */
 GLCameraRender *GLCameraRender::GetInstance() {
+    // 每次都加锁：无锁的"双重检查"在 C++ 内存模型下是数据竞争
+    std::lock_guard<std::mutex> lock(m_Mutex);
     if(s_Instance == nullptr)
     {
-        std::lock_guard<std::mutex> lock(m_Mutex);
-        if(s_Instance == nullptr)
-        {
-            s_Instance = new GLCameraRender();
-        }
-
+        s_Instance = new GLCameraRender();
     }
     return s_Instance;
 }
@@ -621,8 +650,8 @@ bool GLCameraRender::CreateFrameBufferObj() {
         glGenFramebuffers(1, &m_SrcFboId);
         glBindFramebuffer(GL_FRAMEBUFFER, m_SrcFboId);
         glBindTexture(GL_TEXTURE_2D, m_SrcFboTextureId);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_SrcFboTextureId, 0);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_SrcFboTextureId, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER)!= GL_FRAMEBUFFER_COMPLETE) {
             LOGCATE("GLCameraRender::CreateFrameBufferObj glCheckFramebufferStatus status != GL_FRAMEBUFFER_COMPLETE");
             if(m_SrcFboTextureId != GL_NONE) {
@@ -644,8 +673,8 @@ bool GLCameraRender::CreateFrameBufferObj() {
         glGenFramebuffers(1, &m_DstFboId);
         glBindFramebuffer(GL_FRAMEBUFFER, m_DstFboId);
         glBindTexture(GL_TEXTURE_2D, m_DstFboTextureId);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_DstFboTextureId, 0);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_RenderImage.height, m_RenderImage.width, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_DstFboTextureId, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER)!= GL_FRAMEBUFFER_COMPLETE) {
             LOGCATE("GLCameraRender::CreateFrameBufferObj glCheckFramebufferStatus status != GL_FRAMEBUFFER_COMPLETE");
             if(m_DstFboTextureId != GL_NONE) {
@@ -665,7 +694,20 @@ bool GLCameraRender::CreateFrameBufferObj() {
 
     glBindTexture(GL_TEXTURE_2D, GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, GL_NONE);
+    m_FboWidth = m_RenderImage.height;
+    m_FboHeight = m_RenderImage.width;
     return true;
+}
+
+void GLCameraRender::UpdateFboTextureSize(int width, int height) {
+    if(width == m_FboWidth && height == m_FboHeight) return;
+    glBindTexture(GL_TEXTURE_2D, m_SrcFboTextureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, m_DstFboTextureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, GL_NONE);
+    m_FboWidth = width;
+    m_FboHeight = height;
 }
 
 /**
@@ -673,22 +715,26 @@ bool GLCameraRender::CreateFrameBufferObj() {
  *
  * 使用glReadPixels从FBO读取RGBA数据，并通过回调函数传递给录制模块
  */
-void GLCameraRender::GetRenderFrameFromFBO() {
-    LOGCATE("GLCameraRender::GetRenderFrameFromFBO m_RenderFrameCallback=%p", m_RenderFrameCallback);
-    if(m_RenderFrameCallback != nullptr) {
-        // 分配缓冲区并读取像素数据
-        uint8_t *pBuffer = new uint8_t[m_RenderImage.width * m_RenderImage.height * 4];
-        NativeImage nativeImage = m_RenderImage;
-        nativeImage.format = IMAGE_FORMAT_RGBA;
-        nativeImage.width = m_RenderImage.height;
-        nativeImage.height = m_RenderImage.width;
-        nativeImage.pLineSize[0] = nativeImage.width * 4;
-        nativeImage.ppPlane[0] = pBuffer;
-        glReadPixels(0, 0, nativeImage.width, nativeImage.height, GL_RGBA, GL_UNSIGNED_BYTE, pBuffer);
-        // 通过回调传递帧数据
-        m_RenderFrameCallback(m_CallbackContext, &nativeImage);
-        delete []pBuffer;
-    }
+void GLCameraRender::GetRenderFrameFromFBO(int width, int height) {
+    // 不录制时不回读：glReadPixels 会让 CPU 同步等待 GPU 完成渲染，非常耗时
+    if(!m_ReadbackEnabled) return;
+
+    std::lock_guard<std::mutex> lock(m_CallbackMutex);
+    if(m_RenderFrameCallback == nullptr) return;
+
+    // 复用回读缓冲，尺寸变化时才重新分配（原来每帧 new/delete 一块 w*h*4 的内存）
+    size_t bufferSize = static_cast<size_t>(width) * height * 4;
+    if(m_ReadbackBuffer.size() != bufferSize) m_ReadbackBuffer.resize(bufferSize);
+
+    NativeImage nativeImage;
+    nativeImage.format = IMAGE_FORMAT_RGBA;
+    nativeImage.width = width;
+    nativeImage.height = height;
+    nativeImage.pLineSize[0] = width * 4;
+    nativeImage.ppPlane[0] = m_ReadbackBuffer.data();
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, nativeImage.ppPlane[0]);
+    // 通过回调传递帧数据（录制模块会拷贝一份，回调返回后缓冲即可复用）
+    m_RenderFrameCallback(m_CallbackContext, &nativeImage);
 }
 
 /**
@@ -746,7 +792,7 @@ void GLCameraRender::SetLUTImage(int index, NativeImage *pLUTImg) {
  * 当LUT图像发生变化时，更新OpenGL纹理
  */
 void GLCameraRender::UpdateExtTexture() {
-    LOGCATE("GLCameraRender::UpdateExtTexture");
+    // 调用方已持有 m_Mutex
     if(m_ExtImageChanged && m_ExtImage.ppPlane[0] != nullptr) {
         // 删除旧纹理
         if(m_ExtTextureId != GL_NONE) {

@@ -18,10 +18,12 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswresample/swresample.h>
 #include <libavutil/opt.h>
+#include <libavutil/audio_fifo.h>
 }
 
 #include "ThreadSafeQueue.h"
-#include "thread"
+#include <thread>
+#include <atomic>
 #include "LogUtil.h"
 #include "AudioRender.h"
 
@@ -89,23 +91,30 @@ private:
     int EncodeFrame(AVFrame *pFrame);
 
 private:
-    ThreadSafeQueue<AudioFrame *> m_frameQueue;     // 音频帧队列，线程安全
+    /** 从 FIFO 取 nbSamples 个采样，转换格式后编码 */
+    int EncodeSamples(int nbSamples);
+
+    /** 释放所有资源，可重复调用 */
+    void Release();
+
+    ThreadSafeQueue<AudioFrame *> m_frameQueue{200}; // 音频帧队列，线程安全，满了丢弃最旧的
     char m_outUrl[1024] = {0};                      // 输出文件路径
-    int m_frameIndex = 0;                           // 帧索引计数器
-    int m_sampleRate;                               // 音频采样率
-    int m_channelLayout;                            // 声道布局
-    int m_sampleFormat;                             // 采样格式
-    AVPacket m_avPacket;                            // 编码后的数据包
-    AVFrame  *m_pFrame = nullptr;                   // 编码帧缓冲
-    uint8_t *m_pFrameBuffer = nullptr;              // 帧数据缓冲区
-    int m_frameBufferSize;                          // 帧缓冲区大小
+    int64_t m_samplesCount = 0;                     // 已编码的采样数，用于计算 pts
+    int m_sampleRate;                               // 输入音频采样率
+    int m_channelLayout;                            // 输入声道布局
+    int m_sampleFormat;                             // 输入采样格式
+    AVFrame  *m_pFrame = nullptr;                   // 编码帧（编码器格式）
+    AVFrame  *m_pInFrame = nullptr;                 // 从 FIFO 读出的原始数据（输入格式）
+    AVAudioFifo *m_pFifo = nullptr;                 // 采样 FIFO：凑满编码器要求的帧长再编码
     AVCodec  *m_pCodec = nullptr;                   // AAC编码器
     AVStream *m_pStream = nullptr;                  // 音频流
-    AVCodecContext *m_pCodecCtx = nullptr;          // 编码器上下文
+    AVCodecContext *m_pCodecCtx = nullptr;          // 编码器上下文（自己创建并持有）
     AVFormatContext *m_pFormatCtx = nullptr;        // 格式上下文
     SwrContext *m_swrCtx = nullptr;                 // 音频重采样上下文
     thread *m_encodeThread = nullptr;               // 编码线程
-    volatile int m_exit = 0;                        // 退出标志
+    std::atomic<bool> m_started{false};             // 已成功开始录制
+    std::atomic<bool> m_exit{false};                // 退出标志
+    bool m_headerWritten = false;
 };
 
 

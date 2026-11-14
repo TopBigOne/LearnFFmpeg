@@ -20,7 +20,8 @@ extern "C" {
 
 #include "ThreadSafeQueue.h"
 #include "ImageDef.h"
-#include "thread"
+#include <thread>
+#include <atomic>
 #include "LogUtil.h"
 
 using namespace std;
@@ -85,23 +86,32 @@ private:
     int EncodeFrame(AVFrame *pFrame);
 
 private:
-    ThreadSafeQueue<NativeImage *> m_frameQueue;    // 视频帧队列，线程安全
+    /** 待编码的视频帧：图像 + 采集时间戳 */
+    struct TimedImage : public NativeImage {
+        int64_t timestamp = 0;                      // 相对录制开始的毫秒数
+    };
+
+    /** 释放所有资源，可重复调用 */
+    void Release();
+
+    ThreadSafeQueue<TimedImage *> m_frameQueue{15}; // 视频帧队列，线程安全，满了丢弃最旧的帧
     char m_outUrl[1024] = {0};                      // 输出文件路径
     int m_frameWidth;                               // 视频帧宽度
     int m_frameHeight;                              // 视频帧高度
-    int m_frameIndex = 0;                           // 帧索引计数器
+    int64_t m_lastPts = -1;                         // 上一帧 pts，保证严格递增
+    int64_t m_startTime = 0;                        // 录制开始的系统时间（毫秒）
     long m_bitRate;                                 // 视频比特率
     int m_frameRate;                                // 视频帧率
-    AVPacket m_avPacket;                            // 编码后的数据包
-    AVFrame  *m_pFrame = nullptr;                   // 编码帧缓冲
-    uint8_t *m_pFrameBuffer = nullptr;              // 帧数据缓冲区
-    AVCodec  *m_pCodec = nullptr;                   // H264编码器
+    AVFrame  *m_pFrame = nullptr;                   // 编码帧缓冲（YUV420P）
+    AVCodec  *m_pCodec = nullptr;                   // 视频编码器（优先 H.264）
     AVStream *m_pStream = nullptr;                  // 视频流
     AVCodecContext *m_pCodecCtx = nullptr;          // 编码器上下文
     AVFormatContext *m_pFormatCtx = nullptr;        // 格式上下文
     thread *m_encodeThread = nullptr;               // 编码线程
     SwsContext *m_SwsContext = nullptr;             // 图像格式转换上下文
-    volatile int m_exit = 0;                        // 退出标志
+    std::atomic<bool> m_started{false};             // 已成功开始录制
+    std::atomic<bool> m_exit{false};                // 退出标志
+    bool m_headerWritten = false;
 };
 
 
