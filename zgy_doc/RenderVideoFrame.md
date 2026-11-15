@@ -1,5 +1,7 @@
 # RenderVideoFrame 中的 memcpy 详解
 
+> 本文分析的是**重构前**的代码，用来讲清 stride 原理。当前代码有三处变化：源行宽优先取 `pImage->pLineSize[0]`、每行只拷 `width * 4` 字节、行数取图像高度和缓冲区高度的较小值；另外不录像时会跳过这段 memcpy，由 `sws_scale` 直接写入窗口缓冲区。详见 `NativeRender.md`。
+
 ## 代码
 
 ```cpp
@@ -103,6 +105,21 @@ stride = 128
 ```
 
 `stride` 就是这个对齐后的行宽（单位：像素），由系统/驱动决定，代码不能假设 `stride == width`。
+
+---
+
+## 补充：源图像也可能有填充
+
+上面假设源图像每行紧挨着排列（`srcLineSize = width * 4`）。但如果源图像来自 FFmpeg（`AVFrame` / `av_image_alloc`），它的每行也可能按 16、32、64 字节对齐，
+这时源也有填充，`srcLineSize` 应该用图像自带的行宽（`pLineSize[0]`），而每行实际拷贝的字节数仍是 `width * 4`：
+
+```cpp
+int srcLineSize = pImage->pLineSize[0] > 0 ? pImage->pLineSize[0] : pImage->width * 4; // 源步进
+int copyBytes   = pImage->width * 4;                                                    // 每行有效像素
+memcpy(dstBuffer + i * dstLineSize, pImage->ppPlane[0] + i * srcLineSize, copyBytes);
+```
+
+三个量各管一件事：**源步进**、**目标步进**、**每行拷多少**，不要混用。
 
 ---
 

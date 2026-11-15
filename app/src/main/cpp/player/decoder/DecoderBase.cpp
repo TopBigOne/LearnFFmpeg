@@ -141,9 +141,9 @@ int DecoderBase::InitFFDecoder() {
             break;
         }
 
-        // us -> ms，先乘后除保留毫秒精度；直播流没有时长
+        // us -> ms（av_rescale 避免中间结果溢出）；直播流没有时长
         if(m_AVFormatContext->duration != AV_NOPTS_VALUE)
-            m_Duration = m_AVFormatContext->duration * 1000 / AV_TIME_BASE;
+            m_Duration = av_rescale(m_AVFormatContext->duration, 1000, AV_TIME_BASE);
         //创建 AVPacket 存放编码数据
         m_Packet = av_packet_alloc();
         //创建 AVFrame 存放解码后的数据

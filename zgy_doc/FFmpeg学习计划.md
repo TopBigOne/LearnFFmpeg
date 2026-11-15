@@ -226,20 +226,23 @@
 - [ ] 核心算法
   ```cpp
   // 计算延时
-  long AVSync() {
-      // 1. 获取音频时钟
-      long audioClock = GetAudioClock();
+  // 返回 false 表示这一帧应当丢弃
+  bool AVSync() {
+      // 1. 获取音频时钟（毫秒），-1 表示不可用
+      int64_t audioClock = GetAudioClock();
 
-      // 2. 获取视频时钟（当前帧 PTS）
-      long videoClock = m_CurTimeStamp;
+      // 2. 视频时钟 = 当前帧 PTS（毫秒）；音频不可用时退回系统时钟
+      int64_t diff = (audioClock >= 0) ? m_CurTimeStamp - audioClock
+                                       : m_CurTimeStamp - (GetSysCurrentTime() - m_StartTimeStamp);
 
-      // 3. 计算差值
-      long diff = videoClock - audioClock;
+      // 3. 视频超前：等待（单次不超过 100ms，下一帧继续校正）
+      if(diff > 0) { av_usleep(min(diff, 100) * 1000); return true; }
 
-      // 4. 返回延时（毫秒）
-      return diff;
+      // 4. 视频落后超过 100ms：丢帧追赶
+      return diff >= -100;
   }
   ```
+  > 时间戳要用 `int64_t`：`long` 在 armeabi-v7a 上只有 32 位。项目中的实际实现见 `DecoderBase::AVSync`，音频时钟取自 `OpenSLRender::GetAudioClock`。
 
 **Day 4-7: 实现音视频同步**
 - [ ] 实践任务
@@ -934,11 +937,18 @@ AVFrame *frame = av_frame_alloc();
 while(av_read_frame(formatCtx, packet) >= 0) {
     if(packet->stream_index == videoStreamIndex) {
         avcodec_send_packet(codecCtx, packet);
+        // 一个包可能产出 0 个或多个帧；返回 EAGAIN 表示需要更多输入
         while(avcodec_receive_frame(codecCtx, frame) == 0) {
-            // 处理帧数据
+            // 处理帧数据；显示时间用 frame->best_effort_timestamp（不要用 pkt_dts）
         }
     }
     av_packet_unref(packet);
+}
+
+// 4.1 读完后送空包冲刷解码器，取出缓存在解码器里的剩余帧，否则会丢掉最后几帧
+avcodec_send_packet(codecCtx, NULL);
+while(avcodec_receive_frame(codecCtx, frame) == 0) {
+    // 处理剩余帧，直到返回 AVERROR_EOF
 }
 
 // 5. 清理
@@ -965,8 +975,14 @@ codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 codecCtx->time_base = {1, 25};
 codecCtx->bit_rate = 2000000;
 
+// MP4 等容器要求编码器把 SPS/PPS 放进 extradata，必须在 open 之前设置
+if(formatCtx->oformat->flags & AVFMT_GLOBALHEADER)
+    codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
 avcodec_open2(codecCtx, codec, NULL);
+// 必须在 open 之后拷贝，extradata 是 open 时才生成的
 avcodec_parameters_from_context(stream->codecpar, codecCtx);
+stream->time_base = codecCtx->time_base;
 
 // 3. 打开输出文件
 avio_open(&formatCtx->pb, outFile, AVIO_FLAG_WRITE);
@@ -982,9 +998,19 @@ while(有数据) {
 
     avcodec_send_frame(codecCtx, frame);
     while(avcodec_receive_packet(codecCtx, packet) == 0) {
-        av_interleaved_write_frame(formatCtx, packet);
-        av_packet_unref(packet);
+        // 编码器时间基 → 流时间基（avformat_write_header 可能改写了 stream->time_base）
+        av_packet_rescale_ts(packet, codecCtx->time_base, stream->time_base);
+        packet->stream_index = stream->index;
+        av_interleaved_write_frame(formatCtx, packet);   // 内部会 unref packet
     }
+}
+
+// 4.1 送空帧冲刷编码器，取出缓存的剩余包（x264 默认会缓存几十帧）
+avcodec_send_frame(codecCtx, NULL);
+while(avcodec_receive_packet(codecCtx, packet) == 0) {
+    av_packet_rescale_ts(packet, codecCtx->time_base, stream->time_base);
+    packet->stream_index = stream->index;
+    av_interleaved_write_frame(formatCtx, packet);
 }
 
 // 5. 写入文件尾

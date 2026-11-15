@@ -1,6 +1,8 @@
 # NativeRender 源码解析
 
 > 基于 ANativeWindow 的视频帧渲染实现，是 Android 平台上不经过 OpenGL、直接操作 Surface 像素缓冲区的渲染方案。
+>
+> 2026-11-15 更新：代码已重构，`RenderVideoFrame` 改为按源图像实际行宽拷贝、检查 `lock` 返回值，并新增零拷贝路径（见 3.5）。下文代码均为当前版本。
 
 ---
 
@@ -23,6 +25,11 @@ Java 层 Surface  →  ANativeWindow_fromSurface()  →  ANativeWindow*（C++ �
 ```
 构造函数                     Init()                      RenderVideoFrame()          析构函数
 获取 ANativeWindow  →  计算目标尺寸 & 配置缓冲格式  →  逐帧拷贝像素数据到缓冲区  →  释放窗口句柄
+
+                                                    或（不录像时）
+                                                    LockDirectBuffer() →
+                                                    sws_scale 直接写入 →
+                                                    UnlockDirectBuffer()
 ```
 
 ---
@@ -51,6 +58,7 @@ NativeRender::NativeRender(JNIEnv *env, jobject surface)
 void NativeRender::Init(int videoWidth, int videoHeight, int *dstSize)
 {
     if(m_NativeWindow == nullptr) return;
+    if(videoWidth <= 0 || videoHeight <= 0) return;  // 防止下面除零
 
     int windowWidth  = ANativeWindow_getWidth(m_NativeWindow);
     int windowHeight = ANativeWindow_getHeight(m_NativeWindow);
@@ -109,28 +117,42 @@ void NativeRender::Init(int videoWidth, int videoHeight, int *dstSize)
 ```cpp
 void NativeRender::RenderVideoFrame(NativeImage *pImage)
 {
-    if(m_NativeWindow == nullptr || pImage == nullptr) return;
+    if(m_NativeWindow == nullptr || pImage == nullptr || pImage->ppPlane[0] == nullptr) return;
 
-    ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr);
-    uint8_t *dstBuffer = static_cast<uint8_t *>(m_NativeWindowBuffer.bits);
+    uint8_t *dstBuffer = nullptr;
+    int dstLineSize = 0;                       // 目标缓冲区每行字节数 = stride * 4
+    if(!LockDirectBuffer(&dstBuffer, &dstLineSize)) return;   // lock 失败直接放弃这一帧
 
-    int srcLineSize = pImage->width * 4;          // 源图像每行字节数
-    int dstLineSize = m_NativeWindowBuffer.stride * 4; // 目标缓冲区每行字节数
+    // 源图像每行字节数：优先用图像自带的行宽（可能带对齐填充），没有才按 width * 4 计算
+    int srcLineSize = pImage->pLineSize[0] > 0 ? pImage->pLineSize[0] : pImage->width * 4;
+    int copyBytes = pImage->width * 4;         // 每行真正要拷贝的有效像素字节数
+    if(copyBytes > dstLineSize) copyBytes = dstLineSize;
+    // 行数取源图像高度和缓冲区高度的较小值，任何一边都不会越界
+    int rows = pImage->height < m_NativeWindowBuffer.height ? pImage->height : m_NativeWindowBuffer.height;
 
-    for (int i = 0; i < m_DstHeight; ++i) {
-        memcpy(dstBuffer + i * dstLineSize,
-               pImage->ppPlane[0] + i * srcLineSize,
-               srcLineSize);
+    for (int i = 0; i < rows; ++i) {
+        memcpy(dstBuffer + i * dstLineSize, pImage->ppPlane[0] + i * srcLineSize, copyBytes);
     }
 
-    ANativeWindow_unlockAndPost(m_NativeWindow);
+    UnlockDirectBuffer();                      // 内部调用 ANativeWindow_unlockAndPost
 }
 ```
+
+**和旧版本的区别**（旧版本见 `RenderVideoFrame.md`）：
+
+| 项目 | 旧版本 | 当前版本 | 原因 |
+|------|--------|----------|------|
+| 源行宽 | 固定 `width * 4` | 优先 `pLineSize[0]` | 源图像本身也可能有行对齐填充，不能假设紧密排列 |
+| 拷贝长度 | `srcLineSize` | `width * 4`，且不超过目标行宽 | 只拷有效像素，不把源的填充也拷过去 |
+| 行数 | `m_DstHeight` | `min(图像高, 缓冲区高)` | 图像和窗口尺寸不一致时防止越界读写 |
+| lock 返回值 | 不检查 | 失败直接返回 | Surface 已销毁时 lock 会失败，继续写会崩溃 |
 
 #### 3.3.1 锁定缓冲区
 
 ```cpp
-ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr);
+if(ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr) != 0) {
+    return false;   // 失败（如 Surface 已销毁）时不能继续写
+}
 ```
 
 - `ANativeWindow_lock` 向系统申请一块可写的像素缓冲区，存放在 `m_NativeWindowBuffer` 中。
@@ -177,9 +199,9 @@ dstLineSize（目标）  = stride × 4  = 128 × 4 = 512 字节（每行末尾�
 #### 3.3.3 逐行 memcpy 详解
 
 ```cpp
-memcpy(dstBuffer + i * dstLineSize,       // 目标：第 i 行起始地址（按 stride 步进）
-       pImage->ppPlane[0] + i * srcLineSize, // 源：第 i 行起始地址（按 width 步进）
-       srcLineSize);                          // 只拷贝有效像素，不拷贝填充
+memcpy(dstBuffer + i * dstLineSize,          // 目标：第 i 行起始地址（按 stride 步进）
+       pImage->ppPlane[0] + i * srcLineSize,  // 源：第 i 行起始地址（按源行宽步进）
+       copyBytes);                             // 只拷贝有效像素（width * 4），不拷贝填充
 ```
 
 **为什么不能一次性整块 memcpy？**
@@ -237,7 +259,37 @@ ANativeWindow_unlockAndPost(m_NativeWindow);
 
 ---
 
-### 3.4 析构函数
+### 3.4 零拷贝路径：LockDirectBuffer / UnlockDirectBuffer
+
+原流程中一帧数据要经过两次拷贝：`sws_scale` 把 YUV 转成 RGBA 写进中间缓冲 → `RenderVideoFrame` 再逐行 memcpy 到窗口缓冲区。
+当前版本在**不录像**时，`VideoDecoder` 直接锁住窗口缓冲区，让 `sws_scale` 把结果写进去，省掉中间缓冲和一次整帧拷贝：
+
+```cpp
+bool NativeRender::LockDirectBuffer(uint8_t **ppBits, int *pLineSize)
+{
+    if(m_NativeWindow == nullptr) return false;
+    if(ANativeWindow_lock(m_NativeWindow, &m_NativeWindowBuffer, nullptr) != 0) return false;
+    *ppBits = static_cast<uint8_t *>(m_NativeWindowBuffer.bits);
+    *pLineSize = m_NativeWindowBuffer.stride * 4;   // 把 stride 换算成字节交给 sws_scale
+    return true;
+}
+
+// VideoDecoder::OnFrameAvailable 中：
+if(m_pVideoRecorder == nullptr && m_VideoRender->LockDirectBuffer(&windowBits, &windowLineSize)) {
+    uint8_t *dstData[4] = {windowBits, nullptr, nullptr, nullptr};
+    int dstLineSize[4] = {windowLineSize, 0, 0, 0};
+    sws_scale(m_SwsContext, frame->data, frame->linesize, 0, frame->height, dstData, dstLineSize);
+    m_VideoRender->UnlockDirectBuffer();
+}
+```
+
+- `sws_scale` 的目标行宽直接传 `stride * 4`，它会自己按行步进，stride 填充问题自然解决。
+- 录像时仍走旧路径，因为录像需要一份独立的 RGBA 图像交给编码器。
+- `LockDirectBuffer` 是 `VideoRender` 的虚函数，默认返回 false；OpenGL 渲染器不支持，会自动走普通路径。
+
+---
+
+### 3.5 析构函数
 
 ```cpp
 NativeRender::~NativeRender()
@@ -266,10 +318,11 @@ ANativeWindow*（m_NativeWindow）
     │  ANativeWindow_lock()               ← 获取可写缓冲区地址（bits）
     ▼
 像素缓冲区（dstBuffer）
-    ▲
-    │  逐行 memcpy（处理 stride 对齐）
-    │
-NativeImage.ppPlane[0]（RGBA 数据）
+    ▲                    ▲
+    │ 逐行 memcpy         │ 不录像时：sws_scale 直接写入（零拷贝路径）
+    │（处理 stride 对齐）   │
+NativeImage.ppPlane[0]   AVFrame（YUV）
+（RGBA，录像时）
     │
     │  ANativeWindow_unlockAndPost()      ← 提交给 SurfaceFlinger 显示
     ▼
@@ -296,5 +349,5 @@ ANativeWindow 本身支持多种像素格式，但直接写入 YUV 需要硬件�
 |--------|----------------------|----------------|
 | 复杂度 | 低，直接写内存 | 高，需要配置 EGL/GLSL |
 | 灵活性 | 低，仅支持基本像素写入 | 高，支持滤镜、变换等 |
-| 性能 | CPU 拷贝，适合低分辨率 | GPU 加速，适合高分辨率 |
+| 性能 | CPU 做颜色转换（sws_scale），适合低分辨率 | GPU 做颜色转换，适合高分辨率 |
 | 使用场景 | 简单播放、原型验证 | 生产级播放器、特效处理 |

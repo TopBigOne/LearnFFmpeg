@@ -852,7 +852,7 @@ int HWCodecPlayer::InitDecoder() {
         if(m_AVFormatContext->start_time != AV_NOPTS_VALUE)
             m_StartTime = m_AVFormatContext->start_time / 1000;   // us -> ms
         if(m_AVFormatContext->duration != AV_NOPTS_VALUE)
-            m_Duration = m_AVFormatContext->duration / 1000;      // us -> ms
+            m_Duration = av_rescale(m_AVFormatContext->duration, 1000, AV_TIME_BASE);      // us -> ms
 
         //4.视频流（必须有）：交给 MediaCodec 硬解，不需要打开 FFmpeg 视频解码器
         m_VideoStreamIdx = av_find_best_stream(m_AVFormatContext, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
