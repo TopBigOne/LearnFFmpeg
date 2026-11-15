@@ -24,6 +24,16 @@ public class FFMediaPlayer {
     public static final int MSG_DECODER_DONE            = 2;
     public static final int MSG_REQUEST_RENDER          = 3;
     public static final int MSG_DECODING_TIME           = 4;
+    // 播放过程中出错（IO 错误、网络超时等），msgValue 为下面的 MEDIA_ERROR_*；
+    // MSG_DECODER_INIT_ERROR 的 msgValue 同样是 MEDIA_ERROR_*（仅 FFMPEG 播放器）
+    public static final int MSG_PLAYER_ERROR            = 5;
+
+    // 错误类别，取值与 android.media.MediaPlayer 一致
+    public static final int MEDIA_ERROR_UNKNOWN         = 1;
+    public static final int MEDIA_ERROR_IO              = -1004;
+    public static final int MEDIA_ERROR_MALFORMED       = -1007;
+    public static final int MEDIA_ERROR_UNSUPPORTED     = -1010;
+    public static final int MEDIA_ERROR_TIMED_OUT       = -110;
 
     public static final int MEDIA_PARAM_VIDEO_WIDTH     = 0x0001;
     public static final int MEDIA_PARAM_VIDEO_HEIGHT    = 0x0002;
@@ -37,7 +47,9 @@ public class FFMediaPlayer {
     public static final int VIDEO_RENDER_ANWINDOW       = 1;
     public static final int VIDEO_RENDER_3D_VR          = 2;
 
-    private long mNativePlayerHandle = 0;
+    // 事件回调在 native 分发线程，Activity 再转到 UI 线程，可能晚于 unInit 执行：
+    // unInit 先把句柄清零，之后的调用都会在 native 层被忽略，避免访问已释放的播放器
+    private volatile long mNativePlayerHandle = 0;
 
     private EventCallback mEventCallback = null;
 
@@ -93,7 +105,9 @@ public class FFMediaPlayer {
     }
 
     public void unInit() {
-        native_UnInit(mNativePlayerHandle);
+        long handle = mNativePlayerHandle;
+        mNativePlayerHandle = 0;
+        native_UnInit(handle);
         if(mAudioTrack != null) {
             mAudioTrack.stop();
             mAudioTrack.release();
@@ -112,6 +126,7 @@ public class FFMediaPlayer {
         native_SetMediaParams(mNativePlayerHandle, paramType, param);
     }
 
+    // 由 native 事件分发线程调用（不是 UI 线程），实现方需要自行切换线程
     private void playerEventCallback(int msgType, float msgValue) {
         if(mEventCallback != null)
             mEventCallback.onPlayerEvent(msgType, msgValue);
