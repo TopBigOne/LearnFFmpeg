@@ -157,7 +157,8 @@
 
 - [ ] 参考代码
   - `app/src/main/cpp/player/render/video/NativeRender.cpp`
-  - `app/src/main/cpp/player/decoder/DecoderBase.cpp`
+  - `app/src/main/cpp/player/decoder/Decoder.cpp`（send/receive 状态机）
+  - `app/src/main/cpp/player/demux/Demuxer.cpp`（读包线程、seek）
 
 **作业**
 - [ ] 实现一个简单的视频播放器，能播放本地 MP4 文件
@@ -195,12 +196,12 @@
 
 - [ ] 实践任务
   - 实现 `AudioDecoder` 类
-  - 实现 `OpenSLRender` 类
+  - 实现 OpenSL ES 音频输出（项目中为 `OpenSLAudioOutput` + `AudioPlayback`）
   - 集成音频播放到播放器
 
 - [ ] 参考代码
   - `app/src/main/cpp/player/decoder/AudioDecoder.cpp`
-  - `app/src/main/cpp/player/render/audio/OpenSLRender.cpp`
+  - `app/src/main/cpp/player/output/AudioPlayback.cpp`、`output/OpenSLAudioOutput.cpp`
 
 **作业**
 - [ ] 实现音频播放器，播放 MP3/AAC 文件
@@ -242,7 +243,10 @@
       return diff >= -100;
   }
   ```
-  > 时间戳要用 `int64_t`：`long` 在 armeabi-v7a 上只有 32 位。项目中的实际实现见 `DecoderBase::AVSync`，音频时钟取自 `OpenSLRender::GetAudioClock`。
+  > 时间戳要用 `int64_t`：`long` 在 armeabi-v7a 上只有 32 位。
+  > 上面是入门版思路。项目中的软解播放器已改为 ffplay 的做法：独立的视频刷新线程按
+  > `compute_target_delay` 追音频时钟（`output/VideoOutput.cpp`），音频时钟由 OpenSL 回调设置
+  > （`output/AudioPlayback.cpp`），解码线程不再 sleep。
 
 **Day 4-7: 实现音视频同步**
 - [ ] 实践任务
@@ -251,7 +255,8 @@
   - 添加延时补偿机制
 
 - [ ] 参考代码
-  - `app/src/main/cpp/player/decoder/DecoderBase.cpp` (AVSync方法)
+  - `app/src/main/cpp/player/output/VideoOutput.cpp`（RefreshLocked / ComputeTargetDelay）
+  - `app/src/main/cpp/player/core/Clock.cpp`
 
 **作业**
 - [ ] 完善播放器，实现音视频同步

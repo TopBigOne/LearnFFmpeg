@@ -262,7 +262,7 @@ ANativeWindow_unlockAndPost(m_NativeWindow);
 ### 3.4 零拷贝路径：LockDirectBuffer / UnlockDirectBuffer
 
 原流程中一帧数据要经过两次拷贝：`sws_scale` 把 YUV 转成 RGBA 写进中间缓冲 → `RenderVideoFrame` 再逐行 memcpy 到窗口缓冲区。
-当前版本在**不录像**时，`VideoDecoder` 直接锁住窗口缓冲区，让 `sws_scale` 把结果写进去，省掉中间缓冲和一次整帧拷贝：
+当前版本在**不录像**时，视频刷新线程（`VideoOutput::Present`）直接锁住窗口缓冲区，让 `sws_scale` 把结果写进去，省掉中间缓冲和一次整帧拷贝：
 
 ```cpp
 bool NativeRender::LockDirectBuffer(uint8_t **ppBits, int *pLineSize)
@@ -274,12 +274,13 @@ bool NativeRender::LockDirectBuffer(uint8_t **ppBits, int *pLineSize)
     return true;
 }
 
-// VideoDecoder::OnFrameAvailable 中：
-if(m_pVideoRecorder == nullptr && m_VideoRender->LockDirectBuffer(&windowBits, &windowLineSize)) {
+// VideoOutput::Present 中（视频刷新线程）：
+if(renderType == VIDEO_RENDER_ANWINDOW && !m_Recorder
+   && m_Render->LockDirectBuffer(&windowBits, &windowLineSize)) {
     uint8_t *dstData[4] = {windowBits, nullptr, nullptr, nullptr};
     int dstLineSize[4] = {windowLineSize, 0, 0, 0};
-    sws_scale(m_SwsContext, frame->data, frame->linesize, 0, frame->height, dstData, dstLineSize);
-    m_VideoRender->UnlockDirectBuffer();
+    sws_scale(m_SwsCtx.get(), frame->data, frame->linesize, 0, frame->height, dstData, dstLineSize);
+    m_Render->UnlockDirectBuffer();
 }
 ```
 

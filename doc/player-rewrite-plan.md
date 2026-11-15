@@ -5,7 +5,7 @@
 
 每个阶段都要能独立编译、能播放，再进入下一阶段。勾选框用来记录进度。
 
-> **当前状态（2026-11-15）**：阶段 1 的代码修改已完成（提交 `7bb6cb2`、`3c777b8`、`4c14f16`），两个 ABI 编译通过，**尚未真机验收**。阶段 3、4、6 中有几项已顺带完成或部分完成，见各条备注。软解播放器目前仍是音频、视频解码器各自打开一次输入，阶段 2 的单 Demuxer 架构尚未开始。
+> **当前状态（2026-11-15）**：阶段 1 的代码修改已完成（提交 `7bb6cb2`、`3c777b8`、`4c14f16`、`174da6b`）。阶段 2 的代码已完成（提交 `2321156`、`f940420`、`c3aacc0`、`e302066`）：软解播放器改为单 Demuxer + serial 包/帧队列 + 独立视频刷新线程 + 控制线程状态机 + 单一 JNI 回调线程，两个 ABI 编译通过、`assembleDebug` 通过。**阶段 1、2 均未真机验收**（没有设备），验收项与需要重点验证的风险点见阶段 2 末尾。阶段 3、4、6 中有几项已顺带完成或部分完成，见各条备注。
 
 ---
 
@@ -63,31 +63,82 @@ player/
   Player.h/.cpp             # 状态机 + 控制线程（消息队列），对外唯一入口
 ```
 
+### 实际结构
+
+```
+player/
+  core/FFPtr.h  PacketQueue  FrameQueue  Clock  AVSync.h   # AVSync：音频/视频/外部三时钟 + 主时钟选择
+  demux/Demuxer                                            # 唯一的 AVFormatContext + 读包线程
+  decoder/Decoder  AudioDecoder  VideoDecoder              # Decoder：send/receive 状态机 + 解码线程
+  output/AudioOutput.h  OpenSLAudioOutput  AudioPlayback   # AudioPlayback：帧队列 → 重采样 → 设备，音频时钟
+  output/VideoOutput                                       # 视频刷新线程 + 呈现 + 边播边录
+  Player                                                   # 状态机 + 控制线程（计划中的 Player.h/.cpp）
+  JniEventDispatcher                                       # 唯一回调 Java 的线程
+  FFMediaPlayer                                            # MediaPlayer 接口的 JNI 适配层，持有 Player
+```
+
+计划中的 `output/VideoRenderer.h` 没有新建，直接复用已有的 `render/video/VideoRender` 接口；`OboeAudioOutput` 属于阶段 3。
+
+线程与锁（自查结论，供真机验证时对照）：
+
+| 线程 | 阻塞点 | Release 时如何唤醒 |
+|---|---|---|
+| 控制线程 | 命令队列条件变量；Prepare 中的 `avformat_open_input`/`find_stream_info` | 投递 Release 命令；`m_Interrupt` 让 interrupt_callback 返回 1 |
+| 读包线程 | `av_read_frame`/`avformat_seek_file`；缓冲满时 10ms 定时等待 | `Demuxer::Abort`（标志 + notify）+ interrupt_callback |
+| 音/视频解码线程 | `PacketQueue::Get`、`FrameQueue::PeekWritable` | 两个队列 `Abort()` |
+| 视频刷新线程 | ≤10ms 的定时等待；显示时的 `RenderVideoFrame`/`ANativeWindow_lock` | `m_Quit` + notify；显示本身有界 |
+| OpenSL 回调线程 | 从不阻塞（帧队列空就补静音） | `Close()` 中 `Destroy` 等待回调返回 |
+| JNI 分发线程 | 事件队列条件变量；Java 回调本身 | `m_Quit` + notify；Java 回调 300ms 不返回则 detach |
+
+锁都是叶子锁（持有期间不再获取其他播放器锁），唯一的嵌套是刷新线程持 `VideoOutput::m_Mutex` 时调用 FrameQueue/Clock（二者内部锁不会反向获取它）；显示（Present）在锁外进行。Teardown 顺序：Abort 全部队列 → 停刷新线程（并停录制）→ 关闭 OpenSL → 停解码线程 → join 读包线程。
+
 ### 任务
 
 > 已有基础：`common/AVPacketQueue` 已支持 FLUSH/EOS 标记包和 abort（目前只有 HWCodecPlayer 在用），`common/SyncClock` 已线程安全并支持暂停冻结，可作为 `PacketQueue` / `Clock` 的起点；serial 机制还没有。
 
-- [ ] `FFPtr.h`：为 `AVFormatContext`、`AVCodecContext`、`AVFrame`、`AVPacket`、`SwrContext`、`SwsContext` 写 RAII 封装，新代码不再手动 free
-- [ ] `PacketQueue`：put/get/flush/abort；记录缓冲时长和字节数；put 时附带当前 serial；seek 时插入 flush 标记包
-- [ ] `FrameQueue`：固定容量（视频 3、音频 9），`peek`/`next`/`last`，阻塞读写可被 abort 唤醒
-- [ ] `Demuxer`：单线程读包，按流分发到音频/视频 PacketQueue；缓冲满时等待；设置 `interrupt_callback` 支持退出和超时
-- [ ] `Decoder`：严格处理 `EAGAIN`/`EOF`；遇到 flush 标记执行 `avcodec_flush_buffers` 并更新 serial；丢弃 serial 不一致的包
-- [ ] Seek：控制线程置位 seek 请求 → Demuxer 调 `avformat_seek_file` → 清空队列、serial+1 → 解码器 flush → 时钟重置
-- [ ] `Player` 状态机：Idle → Preparing → Prepared → Playing ⇄ Paused → Completed / Error → Released；所有对外接口投递到控制线程串行执行
-- [ ] JNI 层改为只和 `Player` 交互，回调统一走一个消息分发线程（避免在解码线程里直接调 Java）
+- [x] `FFPtr.h`：为 `AVFormatContext`、`AVCodecContext`、`AVFrame`、`AVPacket`、`SwrContext`、`SwsContext` 写 RAII 封装，新代码不再手动 free
+  - 另有 `av_malloc` 缓冲的 `AVBufferPtr`。例外：`AudioPlayback` 的重采样缓冲用 `av_fast_malloc` 管理（需要裸指针），析构时 `av_freep`
+- [x] `PacketQueue`：put/get/flush/abort；记录缓冲时长和字节数；put 时附带当前 serial；seek 时插入 flush 标记包
+  - 新建在 `player/core/`，`common/AVPacketQueue` 原样保留给 HWCodecPlayer。`Flush()` = 清空 + serial+1 + FLUSH 标记；`Start()` 也会放一个 FLUSH 让解码器对齐；EOS 也是标记包
+- [x] `FrameQueue`：固定容量（视频 3、音频 9），`peek`/`next`/`last`，阻塞读写可被 abort 唤醒
+  - 视频队列 keep_last（刷新线程计算帧间隔、暂停预览需要），音频队列不保留
+- [x] `Demuxer`：单线程读包，按流分发到音频/视频 PacketQueue；缓冲满时等待；设置 `interrupt_callback` 支持退出和超时
+  - 缓冲满 = 两队列合计 > 15MB，或每个流都超过 25 包且 > 1 秒（ffplay 阈值）；解码线程发现队列空会唤醒读包线程
+  - 超时：打开 + 探测 20s，单次读包 / seek 15s，超时上报 `MSG_PLAYER_ERROR(MEDIA_ERROR_TIMED_OUT)`
+  - 未选中的流 `AVDISCARD_ALL`；mp3 封面（attached pic）不当作视频；RTSP 暂停期间不读包（ffplay 做法）
+- [x] `Decoder`：严格处理 `EAGAIN`/`EOF`；遇到 flush 标记执行 `avcodec_flush_buffers` 并更新 serial；丢弃 serial 不一致的包
+  - send 返回 EAGAIN 时暂存 pending 包；EOF 排空后记录 `finished = serial`，用于播放完成判断
+- [x] Seek：控制线程置位 seek 请求 → Demuxer 调 `avformat_seek_file` → 清空队列、serial+1 → 解码器 flush → 时钟重置
+  - 请求覆盖式存放，读包线程忙时连续到来的 seek 只执行最后一次；时钟不显式重置，靠 serial 不匹配自动失效（返回 NAN），外部时钟在读包线程里对齐到目标
+  - 暂停中 seek 会显示目标位置的第一帧；未做精确 seek（从关键帧开始显示，不解码丢弃到目标时间）
+- [x] `Player` 状态机：Idle → Preparing → Prepared → Playing ⇄ Paused → Completed / Error → Released；所有对外接口投递到控制线程串行执行
+  - 额外有 `Stopped`（stop 后可再 play，会重新 prepare）。`init()` 后立即异步 prepare；prepare 完成前调用的 play/seek 会在完成后执行
+  - prepare 后以暂停状态启动整条流水线（提前缓冲、显示首帧）；Completed 时暂停输出，再 play 从头播放，seek 则继续播放（与旧版行为一致）
+  - 播放完成判断：各流解码器 `finished == 当前 serial` 且帧队列、OpenSL 队列中都没有真实数据
+  - `Release()` 同步：置中断标志 → 投递 Release → join 控制线程；工作线程投递的命令带会话 id，stop 后旧会话的命令被忽略
+- [x] JNI 层改为只和 `Player` 交互，回调统一走一个消息分发线程（避免在解码线程里直接调 Java）
+  - `JniEventDispatcher`：线程只 Attach 一次；进度、渲染请求在队列里合并；关闭时最多等 300ms，Java 回调卡住则 detach，避免 release 死锁
+  - Java API 保持兼容：新增 `MSG_PLAYER_ERROR` 和 `MEDIA_ERROR_*` 常量（`MSG_DECODER_INIT_ERROR` 的值也改为错误类别）；`MSG_DECODER_DONE` 含义改为 "播放完成"（旧版在解码线程退出时发出，各 Activity 都没有处理它）；`unInit()` 先清零 native 句柄
 
-**验收**：
-- 音视频只打开一次输入（日志确认）
+**验收**（未完成，没有真机）：
+- 音视频只打开一次输入（日志确认：`Demuxer::Open input opened once`）
 - 快速连续 seek 50 次，不花屏、不串音、不卡死
-- 任意状态下调用 release，1 秒内返回，无泄漏（ASan LeakSanitizer）
+- 任意状态下调用 release，1 秒内返回，无泄漏（ASan LeakSanitizer）；日志 `FFMediaPlayer::UnInit done in Xms`
+
+**真机重点验证**（风险最高处）：
+1. OpenSL `Destroy` 是否确实等待正在执行的回调返回（`Close()` 依赖它保证回调不再访问已销毁的 AudioPlayback）；以及 3 × 1024 帧缓冲在低端机上是否欠载
+2. 开启边播边录（StreamMediaPlayerActivity）时 release 耗时：`SingleVideoRecorder::StopRecord` 要编码完队列里最多 15 帧，可能超过 1 秒
+3. 音画同步：音频时钟未扣除设备输出延迟，画面可能早于声音几十毫秒（阶段 3）；无音轨文件走外部时钟
+4. 暂停中 seek、prepare 后首帧预览、Completed 后 play/seek 的状态切换
+5. 网络流：超时值（20s/15s）是否合适，RTSP 暂停/恢复
 
 ## 阶段 3：同步与音频输出
 
 - [ ] 音频输出换成 Oboe（AAudio 优先，低版本回退 OpenSL）；回调中不加锁、不分配内存，从无锁环形缓冲读数据，不够时补静音
 - [ ] 音频时钟 = 已写入数据的末尾 pts − 设备中待播时长；用 `getTimestamp` 校正延迟
-  - 部分完成：OpenSL 版本以"正在播放的那一帧的 pts + 已播放时长"作为音频时钟，但没有扣除设备输出延迟
-- [ ] 视频渲染线程按 ffplay `compute_target_delay` 逻辑追音频时钟：落后丢帧、超前等待，不在解码线程 sleep
-  - 部分完成：已以音频时钟为主时钟，落后超过 100ms 丢帧、超前等待；但等待仍发生在视频解码线程里，没有独立的渲染线程和 FrameQueue- [x] 无音轨时主时钟退回外部时钟（系统时钟）
+  - 部分完成：OpenSL 版本在每块缓冲开始播放时以块首样本 pts 设置时钟（已扣除 OpenSL 队列中的待播数据），但没有扣除混音器/硬件的输出延迟
+- [x] 视频渲染线程按 ffplay `compute_target_delay` 逻辑追音频时钟：落后丢帧、超前等待，不在解码线程 sleep
+  - 阶段 2 一并完成：`output/VideoOutput` 刷新线程 + 视频解码线程提前丢帧；未经真机同步测试- [x] 无音轨时主时钟退回外部时钟（系统时钟）
 - [x] 暂停/恢复时时钟正确冻结和继续
 - [ ] 倍速播放：音频接入 sonic 或 soundtouch（变速不变调），时钟按倍速推进
 
@@ -132,8 +183,8 @@ player/
 | 阶段 | 开始日期 | 完成日期 | 备注 |
 |---|---|---|---|
 | 0 准备 | | | |
-| 1 修 bug | 2026-11-15 | | 代码已改完，待真机验收 |
-| 2 架构 | | | |
+| 1 修 bug | 2026-11-15 | | 代码已改完，待真机验收；软解部分已被阶段 2 重写取代 |
+| 2 架构 | 2026-11-15 | | 代码已完成（2321156、f940420、c3aacc0、e302066），待真机验收 |
 | 3 同步 | | | |
 | 4 解码渲染 | | | |
 | 5 网络 | | | |
