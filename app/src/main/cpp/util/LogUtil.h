@@ -73,7 +73,7 @@
  * 后者是墙上时钟，用户改系统时间或 NTP 校时会让它跳变，音视频同步会被打乱。
  * 注意返回 long long，在 armeabi-v7a 上 long 只有 32 位，存放时间戳请用 int64_t。
  */
-static long long GetSysCurrentTime()
+static inline long long GetSysCurrentTime()
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);

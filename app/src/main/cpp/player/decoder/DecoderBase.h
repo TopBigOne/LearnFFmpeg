@@ -27,7 +27,70 @@ extern "C" {
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
-#include "Decoder.h"
+
+/**
+ * @brief 消息回调函数类型定义
+ * @param void* 上下文指针
+ * @param int 消息类型
+ * @param float 消息代码/数据
+ */
+typedef void (*MessageCallback)(void*, int, float);
+
+/**
+ * @brief 音视频同步回调函数类型定义
+ * @param void* 上下文指针
+ * @return long 同步延迟时间
+ */
+typedef long (*AVSyncCallback)(void*);
+
+/**
+ * @brief 解码器抽象接口类
+ *
+ * 定义解码器的基本接口，所有具体解码器都需要实现这些纯虚函数
+ * 包括播放控制、进度管理、回调设置等功能
+ */
+class IDecoder {
+public:
+    /**
+     * @brief 开始解码/播放
+     */
+    virtual void Start() = 0;
+
+    /**
+     * @brief 暂停解码/播放
+     */
+    virtual void Pause() = 0;
+
+    /**
+     * @brief 停止解码/播放
+     */
+    virtual void Stop() = 0;
+
+    /**
+     * @brief 获取媒体总时长
+     * @return 时长（秒）
+     */
+    virtual float GetDuration() = 0;
+
+    /**
+     * @brief 跳转到指定位置
+     * @param position 目标位置（0.0-1.0之间的浮点数）
+     */
+    virtual void SeekToPosition(float position) = 0;
+
+    /**
+     * @brief 获取当前播放位置
+     * @return 当前位置（秒）
+     */
+    virtual float GetCurrentPosition() = 0;
+
+    /**
+     * @brief 设置消息回调函数
+     * @param context 上下文指针
+     * @param callback 回调函数指针
+     */
+    virtual void SetMessageCallback(void* context, MessageCallback callback) = 0;
+};
 
 #define MAX_PATH   2048                        // 最大路径长度
 #define DELAY_THRESHOLD 100                   // 单次同步等待的上限（ms），避免时间戳异常时长时间睡眠
@@ -59,7 +122,7 @@ enum DecoderMsg {
 /**
  * @brief 解码器基类
  *
- * 继承自Decoder接口，实现基于FFmpeg的音视频解码功能
+ * 继承自IDecoder接口，实现基于FFmpeg的音视频解码功能
  * 提供解码线程管理、音视频同步等基础功能
  *
  * 音视频同步策略（音频为主时钟）：
@@ -68,7 +131,7 @@ enum DecoderMsg {
  *  - 视频解码线程通过 AVSyncCallback 读取音频时钟，早了就等、晚太多就丢帧；
  *  - 拿不到音频时钟（没有音轨、音频还没开始播）时，退回到以系统单调时钟为参考。
  */
-class DecoderBase : public Decoder {
+class DecoderBase : public IDecoder {
 public:
     /**
      * @brief 构造函数
