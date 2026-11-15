@@ -10,12 +10,24 @@
 #define LEARNFFMPEG_MEDIAPLAYER_H
 
 #include <jni.h>
-#include <decoder/VideoDecoder.h>
-#include <decoder/AudioDecoder.h>
-#include <render/audio/AudioRender.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <LogUtil.h>
+#include "PlayerMessage.h"
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+#include <libavutil/time.h>
+#include <libswresample/swresample.h>
+};
 
 // Java层播放器事件回调API名称
 #define JAVA_PLAYER_EVENT_CALLBACK_API_NAME "playerEventCallback"
+
+#define MAX_PATH   2048                         // 最大路径长度
 
 // 媒体参数类型定义
 #define MEDIA_PARAM_VIDEO_WIDTH         0x0001    // 视频宽度

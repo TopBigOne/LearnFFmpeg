@@ -28,6 +28,7 @@ file(GLOB src-files
         ${CMAKE_SOURCE_DIR}/player/*.cpp
         ${CMAKE_SOURCE_DIR}/player/core/*.cpp
         ${CMAKE_SOURCE_DIR}/player/demux/*.cpp
+        ${CMAKE_SOURCE_DIR}/player/output/*.cpp
         ${CMAKE_SOURCE_DIR}/player/decoder/*.cpp
         ${CMAKE_SOURCE_DIR}/player/render/video/*.cpp
         ${CMAKE_SOURCE_DIR}/player/render/audio/*.cpp

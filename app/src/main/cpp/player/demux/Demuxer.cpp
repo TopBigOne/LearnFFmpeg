@@ -142,10 +142,10 @@ void Demuxer::Start(PacketQueue *audioQueue, PacketQueue *videoQueue, Listener *
     m_Thread = std::thread(&Demuxer::ReadLoop, this);
 }
 
-void Demuxer::RequestSeek(double targetSec) {
+void Demuxer::RequestSeek(int64_t targetUs) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     // 直接覆盖：读包线程还没来得及处理的旧请求作废，快速连续 seek 只执行最后一次
-    m_SeekTargetUs = static_cast<int64_t>(targetSec * AV_TIME_BASE);
+    m_SeekTargetUs = targetUs;
     m_SeekRequested = true;
     m_Cond.notify_all();
 }
@@ -198,7 +198,7 @@ void Demuxer::DoSeek(int64_t targetUs) {
     ArmDeadline(0);
     if (ret < 0) {
         LOGCATE("Demuxer::DoSeek seek to %.3fs fail, ret=%d", targetSec, ret);
-        m_Listener->OnSeekCompleted(targetSec, false);
+        m_Listener->OnSeekCompleted(targetUs, false);
         return;
     }
 
@@ -207,7 +207,7 @@ void Demuxer::DoSeek(int64_t targetUs) {
     if (m_VideoQueue) m_VideoQueue->Flush();
     m_Eof = false;
     LOGCATI("Demuxer::DoSeek seek to %.3fs done", targetSec);
-    m_Listener->OnSeekCompleted(targetSec, true);
+    m_Listener->OnSeekCompleted(targetUs, true);
 }
 
 void Demuxer::ReadLoop() {

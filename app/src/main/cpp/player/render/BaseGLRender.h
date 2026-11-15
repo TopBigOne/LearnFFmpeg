@@ -26,13 +26,14 @@ struct TransformMatrix {
     int angleX;
     int angleY;
 
+    // 初始化顺序与成员声明顺序一致（-Wreorder）
     TransformMatrix():
+            degree(0),
+            mirror(0),
             translateX(0),
             translateY(0),
             scaleX(1.0),
             scaleY(1.0),
-            degree(0),
-            mirror(0),
             angleX(0),
             angleY(0)
     {

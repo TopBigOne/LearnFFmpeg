@@ -11,7 +11,7 @@
 #include <PlayerWrapper.h>
 #include <render/video/VideoGLRender.h>
 #include <render/video/VRGLRender.h>
-#include <render/audio/OpenSLRender.h>
+#include <render/audio/AudioGLRender.h>
 #include <MediaRecorderContext.h>
 #include "util/LogUtil.h"
 #include "jni.h"

@@ -10,104 +10,66 @@
 #ifndef LEARNFFMPEG_FFMEDIAPLAYER_H
 #define LEARNFFMPEG_FFMEDIAPLAYER_H
 
+#include <memory>
 #include <MediaPlayer.h>
+#include <render/video/VideoRender.h>
+#include "JniEventDispatcher.h"
+#include "Player.h"
 
 /**
- * @brief FFmpeg媒体播放器类
+ * FFmpeg 软解播放器的 JNI 适配层。
  *
- * 继承自MediaPlayer基类，实现基于FFmpeg的音视频播放功能
- * 支持多种媒体格式的解码和播放
+ * 播放逻辑全部在 Player（状态机 + 控制线程）里，这里只负责：
+ *  - 按渲染类型创建视频渲染器（GL 单例 / NativeRender）；
+ *  - 把 MediaPlayer 接口转成 Player 的异步命令；
+ *  - 把 Player 的事件交给 JniEventDispatcher，由它在唯一的分发线程里回调 Java。
+ *
+ * Init 之后立即开始异步 prepare（打开输入、启动解码），完成时上报 MSG_DECODER_READY；
+ * Play 可以在 prepare 完成之前调用，完成后自动开始播放。
  */
-class FFMediaPlayer : public MediaPlayer {
+class FFMediaPlayer : public MediaPlayer, private Player::Listener {
 public:
-    FFMediaPlayer(){};
-    virtual ~FFMediaPlayer(){};
+    FFMediaPlayer() {}
 
-    /**
-     * @brief 初始化播放器
-     * @param jniEnv JNI环境指针
-     * @param obj Java对象
-     * @param url 媒体文件URL
-     * @param renderType 渲染类型
-     * @param surface Android Surface对象
-     */
-    virtual void Init(JNIEnv *jniEnv, jobject obj, char *url, int renderType, jobject surface);
+    ~FFMediaPlayer() override { UnInit(); }
 
-    /**
-     * @brief 释放播放器资源
-     */
-    virtual void UnInit();
+    void Init(JNIEnv *jniEnv, jobject obj, char *url, int renderType, jobject surface) override;
 
-    /**
-     * @brief 开始播放
-     */
-    virtual void Play();
+    /** 同步释放，保证有限时间内返回 */
+    void UnInit() override;
 
-    /**
-     * @brief 暂停播放
-     */
-    virtual void Pause();
+    /** 开始 / 从暂停恢复 / 播完后从头播放 */
+    void Play() override;
 
-    /**
-     * @brief 停止播放
-     */
-    virtual void Stop();
+    void Pause() override;
 
-    /**
-     * @brief 跳转到指定位置
-     * @param position 目标位置（0.0-1.0）
-     */
-    virtual void SeekToPosition(float position);
+    void Stop() override;
 
-    /**
-     * @brief 获取媒体参数
-     * @param paramType 参数类型
-     * @return 参数值
-     */
-    virtual long GetMediaParams(int paramType);
+    /** @param position 目标位置（秒） */
+    void SeekToPosition(float position) override;
 
-    /**
-     * @brief 设置媒体参数
-     * @param paramType 目前支持 MEDIA_PARAM_RECORD_PATH（obj 为 jstring），需在 Play 之前调用
-     */
-    virtual void SetMediaParams(int paramType, jobject obj);
+    /** 宽高（像素）、时长（秒），任意线程可调用 */
+    long GetMediaParams(int paramType) override;
+
+    /** 目前支持 MEDIA_PARAM_RECORD_PATH（obj 为 jstring），需在 Play 之前调用 */
+    void SetMediaParams(int paramType, jobject obj) override;
 
 private:
-    /**
-     * @brief 获取JNI环境
-     * @param isAttach 是否需要附加到当前线程
-     * @return JNI环境指针
-     */
-    virtual JNIEnv *GetJNIEnv(bool *isAttach);
+    /** 返回当前线程（必须已附加到 JVM，例如 Java 调用线程）的 JNIEnv，不会主动 Attach */
+    JNIEnv *GetJNIEnv(bool *isAttach) override;
 
-    /**
-     * @brief 获取Java对象
-     * @return Java对象引用
-     */
-    virtual jobject GetJavaObj();
+    /** Java 对象的全局引用由 JniEventDispatcher 持有，这里返回 nullptr */
+    jobject GetJavaObj() override;
 
-    /**
-     * @brief 获取Java虚拟机
-     * @return JavaVM指针
-     */
-    virtual JavaVM *GetJavaVM();
+    JavaVM *GetJavaVM() override;
 
-    /**
-     * @brief 向Java层发送消息（静态函数）
-     * @param context 上下文
-     * @param msgType 消息类型
-     * @param msgCode 消息代码
-     */
-    static void PostMessage(void *context, int msgType, float msgCode);
+    /** Player::Listener，在播放器内部线程调用，只做投递 */
+    void OnPlayerEvent(int msg, float value) override;
 
-private:
-    VideoDecoder *m_VideoDecoder = nullptr;        // 视频解码器
-    AudioDecoder *m_AudioDecoder = nullptr;        // 音频解码器
-
-    VideoRender *m_VideoRender = nullptr;          // 视频渲染器
-    AudioRender *m_AudioRender = nullptr;          // 音频渲染器
-
-    jmethodID m_EventCallbackMid = nullptr;        // 缓存的 Java 回调方法 ID，避免每条消息都查找一次
+    std::unique_ptr<Player> m_Player;
+    std::shared_ptr<JniEventDispatcher> m_Dispatcher;
+    VideoRender *m_VideoRender = nullptr;            // GL 渲染器是单例，不持有
+    std::unique_ptr<VideoRender> m_OwnedVideoRender;  // NativeRender 由本对象持有
 };
 
 

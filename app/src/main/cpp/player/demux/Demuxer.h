@@ -31,10 +31,11 @@ public:
 
         /**
          * seek 执行完毕（无论成功与否都会回调，保证上层的 "seek 中" 状态能结束）
-         * @param targetSec 目标位置（秒，流的绝对时间）
-         * @param success   失败时包队列没有被清空，播放从原位置继续
+         * @param targetUs 目标位置（AV_TIME_BASE，流的绝对时间），与 RequestSeek 传入的值相同，
+         *                 上层据此判断完成的是不是最近一次请求
+         * @param success  失败时包队列没有被清空，播放从原位置继续
          */
-        virtual void OnSeekCompleted(double targetSec, bool success) = 0;
+        virtual void OnSeekCompleted(int64_t targetUs, bool success) = 0;
 
         /** 不可恢复的读取错误（IO 错误、超时），之后读包线程退出 */
         virtual void OnDemuxerError(int error) = 0;
@@ -81,8 +82,8 @@ public:
      */
     void Start(PacketQueue *audioQueue, PacketQueue *videoQueue, Listener *listener);
 
-    /** 请求 seek（非阻塞），targetSec 为流的绝对时间 */
-    void RequestSeek(double targetSec);
+    /** 请求 seek（非阻塞），targetUs 为流的绝对时间（AV_TIME_BASE） */
+    void RequestSeek(int64_t targetUs);
 
     /** 暂停/恢复读取（RTSP 等需要通知服务器） */
     void SetPaused(bool paused);
