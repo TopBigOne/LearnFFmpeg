@@ -24,8 +24,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 默认竖屏，点全屏按钮切横屏；configChanges 让旋转时页面不重建、播放不中断 -->
         <activity android:name=".GLMediaPlayerActivity"
-            android:screenOrientation="portrait"/>
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"/>
         <!-- 默认竖屏，点全屏按钮切横屏；configChanges 让旋转时页面不重建、播放不中断 -->
         <activity android:name=".NativeMediaPlayerActivity"
             android:screenOrientation="portrait"

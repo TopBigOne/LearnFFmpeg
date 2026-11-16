@@ -69,6 +69,8 @@ public class DoubleTapSeekView extends View {
     @Nullable
     private Callback mCallback;
     private long mSeekStepMs = DEFAULT_SEEK_STEP_MS;
+    @Nullable
+    private View mPassThroughTarget;
 
     // ---- 手势状态
     private final int mTouchSlop;
@@ -135,11 +137,34 @@ public class DoubleTapSeekView extends View {
         return mSeekStepMs;
     }
 
+    /**
+     * 把所有触摸事件在识别之后原样转发给 target（坐标会换算到 target 上）。
+     * 用于下面的视图自己也要处理手势的场景，例如 GL 画面的拖动旋转、双指缩放。
+     * target 必须和本视图在同一个父布局里。
+     */
+    public void setPassThroughTarget(@Nullable View target) {
+        mPassThroughTarget = target;
+    }
+
     // ---------------------------------------------------------------- 手势
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        boolean handled = handleTouch(event);
+        if (mPassThroughTarget != null) {
+            MotionEvent copy = MotionEvent.obtain(event);
+            copy.offsetLocation(getLeft() - mPassThroughTarget.getLeft(), getTop() - mPassThroughTarget.getTop());
+            mPassThroughTarget.dispatchTouchEvent(copy);
+            copy.recycle();
+        }
+        return handled;
+    }
+
+    private boolean handleTouch(MotionEvent event) {
         switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_POINTER_DOWN:
+                mTapCanceled = true;   // 多指（缩放）不算点击
+                return true;
             case MotionEvent.ACTION_DOWN:
                 mDownX = event.getX();
                 mDownY = event.getY();

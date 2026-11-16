@@ -8,126 +8,100 @@
 
 package com.byteflow.learnffmpeg;
 
-import android.Manifest;
-import android.content.pm.PackageManager;
 import android.opengl.GLSurfaceView;
-import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.util.Log;
-import android.widget.SeekBar;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
 
 import com.monday.av.media.FFMediaPlayer;
 import com.monday.av.media.MyGLSurfaceView;
 
-import java.util.logging.LogManager;
-
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
-import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
-import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
-import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_DONE;
-import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_INIT_ERROR;
-import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_READY;
-import static com.monday.av.media.FFMediaPlayer.MSG_DECODING_TIME;
-import static com.monday.av.media.FFMediaPlayer.MSG_REQUEST_RENDER;
 import static com.monday.av.media.FFMediaPlayer.VIDEO_GL_RENDER;
 import static com.monday.av.media.FFMediaPlayer.VIDEO_RENDER_OPENGL;
 
-public class GLMediaPlayerActivity extends AppCompatActivity implements GLSurfaceView.Renderer, FFMediaPlayer.EventCallback, MyGLSurfaceView.OnGestureCallback{
-    private static final String TAG = "MediaPlayerActivity";
-    private static final String[] REQUEST_PERMISSIONS = {};
-    private static final int PERMISSION_REQUEST_CODE = 1;
-    private MyGLSurfaceView mGLSurfaceView = null;
-    private FFMediaPlayer mMediaPlayer = null;
-    private SeekBar mSeekBar = null;
-    private boolean mIsTouch = false;
-    private String mVideoPath;
+/**
+ * OpenGL ES 渲染的软解播放页。播放列表、控制栏、手势、横竖屏见 {@link BasePlayerActivity}。
+ *
+ * 播放器不依赖 Surface（解码出的帧交给 native 的 VideoGLRender，由 GLSurfaceView 的渲染线程绘制），
+ * 所以随页面生命周期：进入时创建，切后台暂停，回来继续，退出时释放。
+ * GL 画面支持拖动旋转、双指缩放，这些触摸由手势层识别完单击/双击后透传过来。
+ */
+public class GLMediaPlayerActivity extends BasePlayerActivity implements GLSurfaceView.Renderer, MyGLSurfaceView.OnGestureCallback {
+    private static final String TAG = "GLMediaPlayer";
+
+    private MyGLSurfaceView mGLSurfaceView;
+    private boolean mResumeOnForeground = false;     // 切后台前在播放，回来时继续
+
+    @Override
+    protected int getLayoutId() {
+        return R.layout.activity_gl_media_player;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        mVideoPath = getExternalFilesDir(null).getAbsolutePath() + "/byteflow/one_piece.mp4";
-        setContentView(R.layout.activity_gl_media_player);
         mGLSurfaceView = findViewById(R.id.surface_view);
         mGLSurfaceView.setEGLContextClientVersion(3);
         mGLSurfaceView.setRenderer(this);
         mGLSurfaceView.addOnGestureCallback(this);
         mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
+        // 手势层盖在 GL 画面上，拖动、缩放等触摸透传给它
+        mDoubleTapSeekView.setPassThroughTarget(mGLSurfaceView);
 
-        mSeekBar = findViewById(R.id.seek_bar);
-        mSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int i, boolean b) {
-
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-                mIsTouch = true;
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-                Log.d(TAG, "onStopTrackingTouch() called with: progress = [" + seekBar.getProgress() + "]");
-                if(mMediaPlayer != null) {
-                    mMediaPlayer.seekToPosition(mSeekBar.getProgress());
-                    mIsTouch = false;
-                }
-
-            }
-        });
-        mMediaPlayer = new FFMediaPlayer();
-        mMediaPlayer.addEventCallback(this);
-        mMediaPlayer.init(mVideoPath, VIDEO_RENDER_OPENGL, null);
+        openCurrentSource(0);
     }
 
     @Override
     protected void onResume() {
-        Log.e(TAG, "onResume() called");
         super.onResume();
-        if (!hasPermissionsGranted(REQUEST_PERMISSIONS)) {
-            ActivityCompat.requestPermissions(this, REQUEST_PERMISSIONS, PERMISSION_REQUEST_CODE);
-        } else {
-            if(mMediaPlayer != null)
-                mMediaPlayer.play();
-        }
-
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            if (!hasPermissionsGranted(REQUEST_PERMISSIONS)) {
-                Toast.makeText(this, "We need the permission: WRITE_EXTERNAL_STORAGE", Toast.LENGTH_SHORT).show();
-            } else {
-                //if(mMediaPlayer != null)
-                    //mMediaPlayer.play();
-            }
-        } else {
-            super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        mGLSurfaceView.onResume();
+        if (mResumeOnForeground) {
+            mResumeOnForeground = false;
+            startPlayback();
         }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        if(mMediaPlayer != null)
-            mMediaPlayer.pause();
+        mResumeOnForeground = isPlaying();
+        pausePlayback();
+        mGLSurfaceView.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        releasePlayer();
         super.onDestroy();
-        if(mMediaPlayer != null)
-            mMediaPlayer.unInit();
     }
+
+    // ---------------------------------------------------------------- BasePlayerActivity
+
+    @Override
+    protected boolean isRenderTargetReady() {
+        return true;
+    }
+
+    @Override
+    protected void initPlayer(@NonNull FFMediaPlayer player, @NonNull String url) {
+        player.init(url, VIDEO_RENDER_OPENGL, null);
+    }
+
+    @Override
+    protected void onVideoSizeChanged(int width, int height) {
+        mGLSurfaceView.setAspectRatio(width, height);
+    }
+
+    @Override
+    protected void onRequestRender() {
+        mGLSurfaceView.requestRender();
+    }
+
+    // ---------------------------------------------------------------- GLSurfaceView.Renderer（GL 线程）
 
     @Override
     public void onSurfaceCreated(GL10 gl10, EGLConfig eglConfig) {
@@ -136,7 +110,7 @@ public class GLMediaPlayerActivity extends AppCompatActivity implements GLSurfac
 
     @Override
     public void onSurfaceChanged(GL10 gl10, int w, int h) {
-        Log.d(TAG, "onSurfaceChanged() called with: gl10 = [" + gl10 + "], w = [" + w + "], h = [" + h + "]");
+        Log.d(TAG, "onSurfaceChanged: " + w + "x" + h);
         FFMediaPlayer.native_OnSurfaceChanged(VIDEO_GL_RENDER, w, h);
     }
 
@@ -145,61 +119,11 @@ public class GLMediaPlayerActivity extends AppCompatActivity implements GLSurfac
         FFMediaPlayer.native_OnDrawFrame(VIDEO_GL_RENDER);
     }
 
-    @Override
-    public void onPlayerEvent(final int msgType, final float msgValue) {
-        Log.d(TAG, "onPlayerEvent() called with: msgType = [" + msgType + "], msgValue = [" + msgValue + "]");
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                switch (msgType) {
-                    case MSG_DECODER_INIT_ERROR:
-                        break;
-                    case MSG_DECODER_READY:
-                        onDecoderReady();
-                        break;
-                    case MSG_DECODER_DONE:
-                        break;
-                    case MSG_REQUEST_RENDER:
-                        mGLSurfaceView.requestRender();
-                        break;
-                    case MSG_DECODING_TIME:
-                        if(!mIsTouch)
-                            mSeekBar.setProgress((int) msgValue);
-                        break;
-                    default:
-                        break;
-                }
-            }
-        });
-
-    }
-
-    private void onDecoderReady() {
-        int videoWidth = (int) mMediaPlayer.getMediaParams(MEDIA_PARAM_VIDEO_WIDTH);
-        int videoHeight = (int) mMediaPlayer.getMediaParams(MEDIA_PARAM_VIDEO_HEIGHT);
-        if(videoHeight * videoWidth != 0)
-            mGLSurfaceView.setAspectRatio(videoWidth, videoHeight);
-
-        int duration = (int) mMediaPlayer.getMediaParams(MEDIA_PARAM_VIDEO_DURATION);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            mSeekBar.setMin(0);
-        }
-        mSeekBar.setMax(duration);
-    }
-
-    protected boolean hasPermissionsGranted(String[] permissions) {
-        for (String permission : permissions) {
-            if (ActivityCompat.checkSelfPermission(this, permission)
-                    != PackageManager.PERMISSION_GRANTED) {
-                return false;
-            }
-        }
-        return true;
-    }
+    // ---------------------------------------------------------------- 画面手势
 
     @Override
     public void onGesture(int xRotateAngle, int yRotateAngle, float scale) {
-         FFMediaPlayer.native_SetGesture(VIDEO_GL_RENDER, xRotateAngle, yRotateAngle, scale);
+        FFMediaPlayer.native_SetGesture(VIDEO_GL_RENDER, xRotateAngle, yRotateAngle, scale);
     }
 
     @Override

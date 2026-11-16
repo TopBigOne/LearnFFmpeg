@@ -4,20 +4,50 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    tools:context=".MainActivity">
-    <RelativeLayout
-        app:layout_constraintBottom_toBottomOf="parent"
-        android:layout_width="match_parent"
-        android:layout_height="0dp">
+    android:background="#FF000000"
+    tools:context=".GLMediaPlayerActivity">
+
+    <!-- 视频区域：竖屏时宽度铺满、按 16:9 显示在顶部；横屏全屏时铺满整个屏幕（见 BasePlayerActivity） -->
+    <FrameLayout
+        android:id="@+id/player_container"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#FF000000"
+        app:layout_constraintDimensionRatio="H,16:9"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- 按视频宽高比居中显示；拖动旋转、双指缩放由手势层透传过来 -->
         <com.monday.av.media.MyGLSurfaceView
+            android:id="@+id/surface_view"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:layout_centerInParent="true"
-            android:id="@+id/surface_view"/>
-        <SeekBar
+            android:layout_gravity="center" />
+
+        <!-- 手势层：单击显示/隐藏控制栏，双击左右两侧快退/快进，其余触摸透传给 GL 画面 -->
+        <com.monday.av.widget.DoubleTapSeekView
+            android:id="@+id/double_tap_seek_view"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:layout_alignParentBottom="true"
-            android:id="@+id/seek_bar"/>
-    </RelativeLayout>
+            android:layout_height="match_parent" />
+
+        <com.monday.av.widget.PlayerControlView
+            android:id="@+id/player_control_view"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/tv_video_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:padding="16dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/player_container"
+        tools:text="one_piece.mp4（3 / 4）" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>
