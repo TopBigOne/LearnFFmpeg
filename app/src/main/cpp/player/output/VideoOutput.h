@@ -11,6 +11,8 @@
  *
  * 暂停时不推进；但 prepare 后的首帧、暂停中 seek 后的首帧会显示一次作为预览。
  *
+ * 倍速：帧间隔和时钟偏差都是媒体时间，除以倍速换算成真实时间后再参与等待和阈值判断。
+ *
  * 渲染器（VideoRender）由外部持有，可以是 GL 单例或 NativeRender；本类只在 Init/Release 时初始化/清理它。
  */
 
@@ -76,7 +78,12 @@ private:
      */
     bool RefreshLocked(double *remainingTime);
 
-    double ComputeTargetDelay(double delay);
+    /**
+     * @param delay 上一帧应显示的真实时长（秒，已按倍速换算）
+     * @param speed 当前倍速
+     * @return 按主时钟修正后的真实等待时长
+     */
+    double ComputeTargetDelay(double delay, double speed);
 
     double FrameDuration(const DecodedFrame *vp, const DecodedFrame *nextvp) const;
 

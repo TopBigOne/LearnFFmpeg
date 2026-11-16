@@ -36,6 +36,12 @@ void Clock::SetAt(double pts, int serial, double time) {
     SetAtLocked(pts, serial, time);
 }
 
+void Clock::SetAt(double pts, int serial, double time, double speed) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    SetAtLocked(pts, serial, time);
+    m_Speed = speed;
+}
+
 void Clock::Set(double pts, int serial) {
     SetAt(pts, serial, Now());
 }

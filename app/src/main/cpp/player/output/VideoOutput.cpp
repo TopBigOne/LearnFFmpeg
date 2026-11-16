@@ -163,8 +163,10 @@ bool VideoOutput::RefreshLocked(double *remainingTime) {
             break;
         }
 
-        double lastDuration = FrameDuration(lastvp, vp);
-        double delay = ComputeTargetDelay(lastDuration);
+        // 帧间隔是媒体时间，按倍速换算成真实时间
+        const double speed = m_Sync->Speed();
+        double lastDuration = FrameDuration(lastvp, vp) / speed;
+        double delay = ComputeTargetDelay(lastDuration, speed);
         double time = Clock::Now();
         if (time < m_FrameTimer + delay) {
             // 还没到显示时间
@@ -180,7 +182,7 @@ bool VideoOutput::RefreshLocked(double *remainingTime) {
 
         if (m_PictureQueue->NbRemaining() > 1) {
             DecodedFrame *nextvp = m_PictureQueue->PeekNext();
-            double duration = FrameDuration(vp, nextvp);
+            double duration = FrameDuration(vp, nextvp) / speed;
             // 连下一帧的显示时间都已经过了：丢掉这一帧追赶主时钟
             if (m_Sync->Master() != SyncMaster::Video && time > m_FrameTimer + duration) {
                 m_LateDrops++;
@@ -197,14 +199,17 @@ bool VideoOutput::RefreshLocked(double *remainingTime) {
     return display && m_PictureQueue->HasShownFrame();
 }
 
-double VideoOutput::ComputeTargetDelay(double delay) {
+double VideoOutput::ComputeTargetDelay(double delay, double speed) {
     if (m_Sync->Master() == SyncMaster::Video) return delay;
 
-    // 视频时钟相对主时钟的偏差：正数表示视频超前
-    double diff = m_Sync->videoClock.Get() - m_Sync->GetMasterClock();
+    // 视频时钟相对主时钟的偏差（媒体时间）：正数表示视频超前
+    double mediaDiff = m_Sync->videoClock.Get() - m_Sync->GetMasterClock();
+    // 换算成真实时间：2 倍速下落后 0.1s 媒体时间，只需少等 0.05s 就能追上
+    double diff = mediaDiff / speed;
     // 偏差小于一帧（且在 [MIN, MAX] 内）时不修正，避免来回抖动
     double syncThreshold = std::max(AV_SYNC_THRESHOLD_MIN, std::min(AV_SYNC_THRESHOLD_MAX, delay));
-    if (!std::isnan(diff) && std::fabs(diff) < m_MaxFrameDuration) {
+    // 偏差大到超过最大帧间隔（时间戳跳变）时不修正，这个判断针对的是时间戳本身，用媒体时间
+    if (!std::isnan(diff) && std::fabs(mediaDiff) < m_MaxFrameDuration) {
         if (diff <= -syncThreshold) {
             delay = std::max(0.0, delay + diff);
         } else if (diff >= syncThreshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) {

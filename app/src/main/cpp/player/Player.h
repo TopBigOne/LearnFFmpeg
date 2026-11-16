@@ -88,6 +88,12 @@ public:
     void SetRecordPath(const std::string &path);
 
     /**
+     * 倍速播放，范围 [0.25, 4.0]，超出时截断；变速不变调。任意状态下都可以设置，stop 后重新播放仍然保持。
+     * 声音的速度变化要等设备缓冲里的旧数据播完（几十毫秒）才听得到
+     */
+    void SetSpeed(float speed);
+
+    /**
      * 同步释放：停止所有线程并回收资源，保证在有限时间内返回；可重复调用。
      * 不能在 Listener 回调里调用（回调线程正是要被回收的线程之一）
      */
@@ -104,6 +110,8 @@ public:
 
     double CurrentPositionSec() const { return m_PositionSec.load(); }
 
+    float Speed() const { return m_SpeedValue.load(); }
+
 private:
     struct Session;
 
@@ -115,6 +123,7 @@ private:
         Seek,
         Stop,
         SetRecordPath,
+        SetSpeed,
         SeekCompleted,      // 来自读包线程
         StreamError,        // 来自读包线程
         Release
@@ -146,6 +155,7 @@ private:
     void DoStop();
     void DoSeekCompleted(int64_t targetUs, bool success);
     void DoStreamError(int error);
+    void DoSetSpeed(float speed);
 
     /** 启动/恢复 Session 的输出，进入 Playing */
     void Resume();
@@ -181,6 +191,7 @@ private:
     int m_NextSessionId = 1;
     std::string m_Url;
     std::string m_RecordPath;
+    float m_Speed = 1.0f;
     bool m_PlayWhenReady = false;
     double m_PendingSeekSec = -1;       // prepare 完成前收到的 seek，<0 表示没有
     bool m_SeekInFlight = false;        // 已交给 Demuxer、尚未完成的 seek
@@ -192,6 +203,7 @@ private:
     std::atomic<int> m_VideoHeight{0};
     std::atomic<int64_t> m_DurationMs{0};
     std::atomic<double> m_PositionSec{0};
+    std::atomic<float> m_SpeedValue{1.0f};
 };
 
 #endif //LEARNFFMPEG_PLAYER_H

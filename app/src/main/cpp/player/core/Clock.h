@@ -3,6 +3,8 @@
  *
  * 记录 "在系统时刻 lastUpdated 正在播放 pts"，读取时按流逝的时间外推：
  *     clock = ptsDrift + now - (now - lastUpdated) * (1 - speed)，其中 ptsDrift = pts - lastUpdated
+ * 即 clock = pts + (now - lastUpdated) * speed。speed 是倍速：每过 1 秒真实时间，媒体时间前进 speed 秒。
+ * lastUpdated 可以晚于当前时刻（音频输出按 "这块数据将在何时播出" 设置），外推公式同样成立。
  *
  * serial：时钟记录了设置它时数据所属的包序列号；读取时如果与对应 PacketQueue 的当前 serial 不同，
  * 说明 seek 之后还没有新数据到来，时钟已过期，返回 NAN。这样 seek 不需要显式 "重置" 各个时钟。
@@ -38,13 +40,16 @@ public:
     /** 在系统时刻 time（秒）时正在播放 pts */
     void SetAt(double pts, int serial, double time);
 
+    /** 同上，并原子地设置从该时刻起的倍速（音频输出知道每块数据实际按什么速度播放） */
+    void SetAt(double pts, int serial, double time, double speed);
+
     /** 以当前系统时间设置 */
     void Set(double pts, int serial);
 
     /** 暂停冻结 / 恢复继续 */
     void SetPaused(bool paused);
 
-    /** 倍速（阶段 3 才会用到，先保留与 ffplay 一致的计算） */
+    /** 倍速：以当前值为起点，此后按新速度推进（ffplay set_clock_speed） */
     void SetSpeed(double speed);
 
     int Serial();

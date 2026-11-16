@@ -85,7 +85,7 @@ struct Player::Session : public Demuxer::Listener, public VideoOutput::Listener 
         videoPackets.Abort();
         audioFrames.Abort();
         videoFrames.Abort();
-        // 2. 停输出：刷新线程不在任何队列上阻塞；OpenSL Destroy 等待回调返回，回调本身不阻塞
+        // 2. 停输出：刷新线程不在任何队列上阻塞；Oboe stop 等待数据回调返回，回调本身不阻塞
         if (videoOutput) videoOutput->Stop();
         if (audioPlayback) audioPlayback->Close();
         // 3. 停解码线程
@@ -210,6 +210,15 @@ void Player::SetRecordPath(const std::string &path) {
     Post(std::move(command));
 }
 
+void Player::SetSpeed(float speed) {
+    speed = AudioPlayback::ClampSpeed(speed);
+    // 查询接口立即反映新值，实际切换在控制线程里进行
+    m_SpeedValue = speed;
+    Command command{CommandType::SetSpeed};
+    command.value = speed;
+    Post(std::move(command));
+}
+
 void Player::Release() {
     {
         std::lock_guard<std::mutex> lock(m_CommandMutex);
@@ -306,6 +315,9 @@ bool Player::HandleCommand(const Command &command) {
         case CommandType::SetRecordPath:
             m_RecordPath = command.text;
             break;
+        case CommandType::SetSpeed:
+            DoSetSpeed(static_cast<float>(command.value));
+            break;
         case CommandType::SeekCompleted:
             DoSeekCompleted(command.value64, command.success);
             break;
@@ -347,6 +359,12 @@ void Player::DoPrepare() {
             if (ctx) {
                 session->audioDecoder.reset(new AudioDecoder(std::move(ctx), &session->audioPackets,
                                                              &session->audioFrames, wakeDemuxer));
+                // 设备还没 Start，不会有回调，这里设置是安全的
+                AudioDecoder *decoder = session->audioDecoder.get();
+                PacketQueue *packets = &session->audioPackets;
+                session->audioPlayback->SetInputFinishedProbe([decoder, packets] {
+                    return decoder->Finished() == packets->Serial();
+                });
                 // 无法按时间戳 seek 的裸流（如 ADTS AAC）音频包没有 pts，从流起始时间按采样数推算
                 if ((ic->iformat->flags & (AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH | AVFMT_NO_BYTE_SEEK))
                     && !ic->iformat->read_seek) {
@@ -399,6 +417,9 @@ void Player::DoPrepare() {
     AVFormatContext *ic = session->demuxer.Context();
     session->startTimeUs = ic->start_time != AV_NOPTS_VALUE ? ic->start_time : 0;
     session->sync.SetMaster(session->audioDecoder ? SyncMaster::Audio : SyncMaster::External);
+    // 倍速跨会话保持（stop 后重新播放、播完重播）
+    session->sync.SetSpeed(m_Speed);
+    if (session->audioPlayback) session->audioPlayback->SetSpeed(m_Speed);
     // 先以暂停状态启动整条流水线：读包、解码提前缓冲，start 时可以立即出画出声
     session->sync.SetPaused(true);
     m_DurationMs = session->demuxer.DurationMs();
@@ -523,6 +544,16 @@ void Player::DoStreamError(int error) {
         default:
             break;
     }
+}
+
+void Player::DoSetSpeed(float speed) {
+    if (speed == m_Speed) return;
+    LOGCATI("Player::DoSetSpeed %.2f -> %.2f", m_Speed, speed);
+    m_Speed = speed;
+    Session *session = m_Session.get();
+    if (session == nullptr) return;
+    session->sync.SetSpeed(speed);
+    if (session->audioPlayback) session->audioPlayback->SetSpeed(speed);
 }
 
 void Player::Resume() {
