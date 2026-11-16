@@ -29,6 +29,18 @@ android {
             }
         }
     }
+    buildTypes {
+        // AddressSanitizer 构建：native 代码带 ASan 插桩，用于排查内存错误（说明见 src/main/cpp/util/ASAN.md）。
+        // app 有同名构建类型，会自动匹配
+        create("asan") {
+            initWith(getByName("debug"))
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DLEARNFFMPEG_ASAN=ON"
+                }
+            }
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11

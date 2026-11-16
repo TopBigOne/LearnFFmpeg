@@ -28,6 +28,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.byteflow.learnffmpeg.adapter.MyRecyclerViewAdapter;
+import com.monday.av.debug.ASanTester;
 import com.monday.av.media.FFMediaPlayer;
 import com.byteflow.learnffmpeg.util.CommonUtils;
 
@@ -69,6 +70,13 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         ((TextView)findViewById(R.id.text_view)).setText("FFmpeg 版本和编译配置信息\n\n" + FFMediaPlayer.GetFFmpegVersion());
+
+        // ASan 自检：adb shell am start -n com.byteflow.learnffmpeg/.MainActivity --ei asan_case 1
+        // 只有 asan 构建类型才会真正触发内存错误（见 lib_av/src/main/cpp/util/ASAN.md）
+        int asanCase = getIntent().getIntExtra("asan_case", 0);
+        if (asanCase > 0 && ASanTester.isAsanBuild()) {
+            ASanTester.runCase(asanCase);
+        }
 
     }
 

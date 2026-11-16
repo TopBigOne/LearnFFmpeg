@@ -28,9 +28,20 @@ bool IsSoftwareCodec(const std::string &name) {
 
 }
 
-bool HwVideoEncoder::IsDisabledByDebugProperty() {
+static bool IsPropertyOn(const char *name) {
     char value[PROP_VALUE_MAX] = {0};
-    return __system_property_get("debug.learnffmpeg.sw_encode", value) > 0 && strcmp(value, "1") == 0;
+    return __system_property_get(name, value) > 0 && strcmp(value, "1") == 0;
+}
+
+bool HwVideoEncoder::IsDisabledByDebugProperty() {
+    if (IsPropertyOn("debug.learnffmpeg.sw_encode")) return true;
+#ifdef LEARNFFMPEG_ASAN
+    if (!IsPropertyOn("debug.learnffmpeg.asan_hw_encode")) {
+        LOGCATE("HwVideoEncoder: ASan build, hardware encoding disabled (setprop debug.learnffmpeg.asan_hw_encode 1 to enable)");
+        return true;
+    }
+#endif
+    return false;
 }
 
 HwVideoEncoder::~HwVideoEncoder() {

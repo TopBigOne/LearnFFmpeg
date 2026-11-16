@@ -57,7 +57,11 @@ public:
     HwVideoEncoder &operator=(const HwVideoEncoder &) = delete;
 
     /**
-     * 调试开关：adb shell setprop debug.learnffmpeg.sw_encode 1 时所有录制都不用硬件编码，用于验证回退路径
+     * 是否禁用硬件编码（调用方据此直接走 x264）：
+     *  - adb shell setprop debug.learnffmpeg.sw_encode 1：调试开关，用于验证回退路径；
+     *  - ASan 构建默认禁用：部分设备的系统编码器（实测三星 libsfplugin_ccodec.so 的 customConfigVideoEncoder）
+     *    在 ASan 运行时下 configure 时栈保护报错崩溃，与本工程代码无关。
+     *    需要在 ASan 构建里测硬件编码时：adb shell setprop debug.learnffmpeg.asan_hw_encode 1
      */
     static bool IsDisabledByDebugProperty();
 

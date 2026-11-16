@@ -57,8 +57,6 @@ JNIEXPORT jstring JNICALL Java_com_monday_av_media_FFMediaPlayer_native_1GetFFmp
     strcat(strBuffer, avcodec_license());
     LOGCATE("GetFFmpegVersion\n%s", strBuffer);
 
-    //ASanTestCase::MainTest();
-
     return env->NewStringUTF(strBuffer);
 }
 
@@ -553,4 +551,28 @@ Java_com_monday_av_media_YuvUtil_nativeAndroid420ToI420(JNIEnv *env, jclass claz
     bool ok = YuvConvert::Android420ToI420(planes, out, width, outU, halfW, outV, halfW);
     env->ReleasePrimitiveArrayCritical(dst, out, 0);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * ASan 测试入口（com.monday.av.debug.ASanTester.runCase）。
+ * 只有 asan 构建类型（CMake 定义了 LEARNFFMPEG_ASAN）才执行，其他构建只打日志，避免在没有 ASan 时制造真正的内存破坏。
+ */
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_monday_av_debug_ASanTester_nativeRunCase(JNIEnv *env, jclass clazz, jint case_id) {
+#ifdef LEARNFFMPEG_ASAN
+    ASanTestCase::Run(case_id);
+#else
+    LOGCATE("ASanTester: not an ASan build, ignore case %d (build with ./gradlew :app:installAsan)", case_id);
+#endif
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_monday_av_debug_ASanTester_nativeIsAsanBuild(JNIEnv *env, jclass clazz) {
+#ifdef LEARNFFMPEG_ASAN
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
 }

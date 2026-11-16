@@ -112,9 +112,16 @@ add_library( # Sets the name of the library.
 target_compile_definitions(${libname} PRIVATE __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__)
 target_compile_options(${libname} PRIVATE -Werror=unguarded-availability)
 
-#ASAN 需要 NDK20 编译，Android P 以上运行
-#target_compile_options(${libname} PUBLIC -fsanitize=address -fno-omit-frame-pointer)
-#set_target_properties(${libname} PROPERTIES LINK_FLAGS -fsanitize=address)
+# AddressSanitizer：只在 asan 构建类型下打开（lib_av/build.gradle.kts 传 -DLEARNFFMPEG_ASAN=ON），说明见 util/ASAN.md。
+# 只给本库的源码插桩；预编译的 FFmpeg/x264 等静态库没有插桩，其内部越界检测不到，
+# 但它们的 malloc/free 仍经过 ASan，释放后使用、重复释放等堆错误依然能发现
+option(LEARNFFMPEG_ASAN "Build learn-ffmpeg with AddressSanitizer" OFF)
+if(LEARNFFMPEG_ASAN)
+    message(STATUS "learn-ffmpeg: AddressSanitizer enabled")
+    target_compile_definitions(${libname} PRIVATE LEARNFFMPEG_ASAN=1)
+    target_compile_options(${libname} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(${libname} PRIVATE -fsanitize=address)
+endif()
 
 set(third-party-libs
         oboe

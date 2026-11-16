@@ -11,85 +11,86 @@
 #include "LogUtil.h"
 
 /**
- * @brief AddressSanitizer (ASan) 测试用例类
+ * @brief AddressSanitizer (ASan) 测试用例：每个用例故意制造一种内存错误，用来确认 ASan 已生效。
  *
- * 用于测试和演示各种内存错误场景，帮助验证ASan工具的检测能力
- * 警告：此类包含故意制造的内存错误，仅用于测试目的
+ * 用法（详见 lib_av/src/main/cpp/util/ASAN.md）：
+ *   ./gradlew :app:installAsan
+ *   adb shell am start -n com.byteflow.learnffmpeg/.MainActivity --ei asan_case 1
+ *   adb logcat | grep -A30 AddressSanitizer
+ *
+ * ASan 发现第一个错误就会打印报告并终止进程，所以一次只能跑一个用例（Run 传编号）。
+ * 只有 asan 构建类型才会调用到这里，普通构建里这些错误不会被检测，只会造成未定义行为。
  */
 class ASanTestCase {
-    /**
-     * @brief 堆缓冲区溢出测试
-     * 故意访问堆分配数组的越界位置，触发heap-buffer-overflow错误
-     */
-    static void HeapBufferOverflow() {
-        int *arr = new int[1024];
-        arr[0] = 11;
-        arr[1024] = 12;  // 越界访问：有效索引为 0-1023
-        LOGCATE("HeapBufferOverflow arr[0]=%d, arr[1024]",arr[0], arr[1024]);
+public:
+    enum Case {
+        kHeapBufferOverflow = 1,   // 堆缓冲区越界：heap-buffer-overflow
+        kStackBufferOverflow = 2,  // 栈缓冲区越界：stack-buffer-overflow
+        kUseAfterFree = 3,         // 释放后使用：heap-use-after-free
+        kUseAfterScope = 4,        // 作用域外使用栈变量：stack-use-after-scope
+        kDoubleFree = 5,           // 重复释放：attempting double-free
+    };
+
+    /** 执行一个用例；ASan 生效时进程会在这里终止并在 logcat 输出报告 */
+    static void Run(int caseId) {
+        LOGCATE("ASanTestCase::Run case=%d", caseId);
+        switch (caseId) {
+            case kHeapBufferOverflow:  HeapBufferOverflow(); break;
+            case kStackBufferOverflow: StackBufferOverflow(); break;
+            case kUseAfterFree:        UseAfterFree(); break;
+            case kUseAfterScope:       UseAfterScope(); break;
+            case kDoubleFree:          DoubleFree(); break;
+            default: LOGCATE("ASanTestCase::Run unknown case %d (valid: 1-5)", caseId); return;
+        }
+        // 能走到这里说明 ASan 没有生效（不是 asan 构建，或运行时没有加载）
+        LOGCATE("ASanTestCase::Run case=%d finished without ASan report: ASan is NOT active", caseId);
     }
 
-    /**
-     * @brief 栈缓冲区溢出测试
-     * 故意访问栈分配数组的越界位置，触发stack-buffer-overflow错误
-     */
-    static void StackBufferOverflow() {
+private:
+    // 越界下标通过 volatile 读出：编译器在编译期看不出越界，不会直接优化掉或报 -Warray-bounds
+    static int OutOfBoundsIndex() {
+        static volatile int index = 1024;
+        return index;
+    }
+
+    __attribute__((noinline)) static void HeapBufferOverflow() {
+        int *arr = new int[1024];
+        arr[0] = 11;
+        arr[OutOfBoundsIndex()] = 12;  // 越界写：有效索引为 0-1023
+        LOGCATE("HeapBufferOverflow arr[0]=%d", arr[0]);
+        delete[] arr;
+    }
+
+    __attribute__((noinline)) static void StackBufferOverflow() {
         int arr[1024];
         arr[0] = 11;
-        arr[1024] = 12;  // 越界访问：有效索引为 0-1023
-        LOGCATE("StackBufferOverflow arr[0]=%d, arr[1024]",arr[0], arr[1024]);
+        arr[OutOfBoundsIndex()] = 12;  // 越界写：有效索引为 0-1023
+        LOGCATE("StackBufferOverflow arr[0]=%d", arr[0]);
     }
 
-    /**
-     * @brief 释放后使用测试
-     * 故意在内存释放后继续访问，触发heap-use-after-free错误
-     */
-    static void UseAfterFree() {
+    __attribute__((noinline)) static void UseAfterFree() {
         int *arr = new int[1024];
         arr[0] = 11;
-        delete [] arr;  // 释放内存
-        LOGCATE("UseAfterFree arr[0]=%d, arr[1024]",arr[0], arr[1024]);  // 使用已释放的内存
+        delete[] arr;
+        LOGCATE("UseAfterFree arr[0]=%d", arr[0]);  // 读已释放的内存
     }
 
-    /**
-     * @brief 双重释放测试
-     * 故意对同一块内存执行两次delete操作，触发double-free错误
-     */
-    static void DoubleFree() {
-        int *arr = new int[1024];
-        arr[0] = 11;
-        delete [] arr;  // 第一次释放
-        delete [] arr;  // 第二次释放同一块内存
-        LOGCATE("UseAfterFree arr[0]=%d",arr[0]);
-    }
-
-    /**
-     * @brief 作用域外使用栈变量测试
-     * 故意在变量作用域结束后继续使用其地址，触发stack-use-after-scope错误
-     */
-    static int *p;  // 静态指针，用于保存局部变量地址
-    static void UseAfterScope()
-    {
+    __attribute__((noinline)) static void UseAfterScope() {
+        volatile int *p = nullptr;
         {
             int a = 0;
             p = &a;  // 保存局部变量地址
-        }  // a 的作用域结束
-        *p = 1111;  // 使用已销毁的栈变量
-        LOGCATE("UseAfterScope *p=%d",*p);
+        }            // a 的作用域结束
+        *p = 1111;   // 写已离开作用域的栈变量
+        LOGCATE("UseAfterScope *p=%d", *p);
     }
 
-public:
-    /**
-     * @brief 主测试函数
-     * 依次执行所有ASan测试用例
-     * 警告：运行此函数会触发多种内存错误
-     */
-    static void MainTest() {
-        HeapBufferOverflow();
-        StackBufferOverflow();
-        UseAfterFree();
-        UseAfterScope();
-        DoubleFree();
+    __attribute__((noinline)) static void DoubleFree() {
+        int *volatile arr = new int[1024];
+        arr[0] = 11;
+        delete[] arr;
+        delete[] arr;  // 同一块内存释放两次
     }
 };
-int *ASanTestCase::p = nullptr;  // 静态成员变量定义
+
 #endif //LEARNFFMPEG_ASANTESTCASE_H
