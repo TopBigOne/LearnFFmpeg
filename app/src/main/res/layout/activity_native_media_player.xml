@@ -25,7 +25,13 @@
             android:layout_height="match_parent"
             android:layout_gravity="center" />
 
-        <!-- 控制栏叠在视频底部 -->
+        <!-- 手势层：单击显示/隐藏控制栏，双击左右两侧快退/快进 -->
+        <com.monday.av.widget.DoubleTapSeekView
+            android:id="@+id/double_tap_seek_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- 控制栏叠在视频底部（在手势层之上，点控制栏不会触发手势） -->
         <com.monday.av.widget.PlayerControlView
             android:id="@+id/player_control_view"
             android:layout_width="match_parent"

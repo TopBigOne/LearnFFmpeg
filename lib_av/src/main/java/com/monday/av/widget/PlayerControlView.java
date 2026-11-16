@@ -186,6 +186,19 @@ public class PlayerControlView extends LinearLayout {
         return mPositionMs;
     }
 
+    /**
+     * 预览即将跳转到的位置（如双击快进/快退连点过程中），进度条和时间立即显示目标位置；
+     * 之后一段时间内忽略播放器上报的旧进度，直到它追上目标。拖动进度条期间调用无效。
+     */
+    public void showSeekPreview(long targetMs) {
+        if (mDragging) return;
+        mPositionMs = Math.max(0, targetMs);
+        mPendingSeekMs = mPositionMs;
+        mPendingSeekTime = SystemClock.uptimeMillis();
+        mSeekBar.setProgress((int) Math.min(mPositionMs, Integer.MAX_VALUE));
+        updateTimeText(mPositionMs);
+    }
+
     /** 播放状态，决定播放/暂停按钮的图标，以及是否自动隐藏 */
     public void setPlaying(boolean playing) {
         mPlaying = playing;

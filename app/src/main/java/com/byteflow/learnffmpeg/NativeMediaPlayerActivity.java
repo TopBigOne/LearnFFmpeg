@@ -28,6 +28,7 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.monday.av.media.FFMediaPlayer;
 import com.monday.av.media.MySurfaceView;
+import com.monday.av.widget.DoubleTapSeekView;
 import com.monday.av.widget.PlayerControlView;
 
 import java.io.File;
@@ -74,6 +75,7 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
 
     private long mDurationMs = 0;
     private boolean mPlaying = false;
+    private boolean mCompleted = false;              // 已播放到结尾
     // 播放器准备好之后要跳转到的位置（毫秒）：切后台再回来时从原位置继续
     private long mPendingStartPositionMs = 0;
 
@@ -96,8 +98,7 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
         mTitleView = findViewById(R.id.tv_video_title);
 
         mSurfaceView.getHolder().addCallback(this);
-        // 点视频区域显示/隐藏控制栏
-        mPlayerContainer.setOnClickListener(v -> mControlView.toggleVisibility());
+        setupDoubleTapSeek();
 
         mControlView.setListener(this);
         mControlView.setSpeedText(formatSpeed(SPEEDS[mSpeedIndex]));
@@ -107,6 +108,39 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
         loadPlaylist();
         updateSourceInfo();
         applyOrientation(getResources().getConfiguration().orientation);
+    }
+
+    /** 单击视频：显示/隐藏控制栏；双击左右两侧：每次后退/快进 5 秒，连点累加 */
+    private void setupDoubleTapSeek() {
+        DoubleTapSeekView seekView = findViewById(R.id.double_tap_seek_view);
+        seekView.setSeekStepMs(5000);
+        seekView.setCallback(new DoubleTapSeekView.Callback() {
+            @Override
+            public long getCurrentPosition() {
+                return mControlView.getPosition();
+            }
+
+            @Override
+            public long getDuration() {
+                return mMediaPlayer != null ? mDurationMs : 0;
+            }
+
+            @Override
+            public void onSingleTap() {
+                mControlView.toggleVisibility();
+            }
+
+            @Override
+            public void onSeekPreview(long targetMs) {
+                mControlView.showSeekPreview(targetMs);
+            }
+
+            @Override
+            public void onSeekCommit(long targetMs) {
+                mControlView.showSeekPreview(targetMs);
+                seekTo(targetMs);
+            }
+        });
     }
 
     // ---------------------------------------------------------------- 播放列表
@@ -154,6 +188,7 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
         releasePlayer();
         mControlView.reset();
         mDurationMs = 0;
+        mCompleted = false;
         if (mSurfaceHolder == null) return;   // Surface 还没准备好，surfaceCreated 时再打开
 
         mPendingStartPositionMs = startPositionMs;
@@ -193,6 +228,7 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
                 break;
             case MSG_DECODER_DONE:
                 // 播完：停在结尾，再点播放从头开始（播放器状态机 Completed --Start--> 从头播放）
+                mCompleted = true;
                 setPlaying(false);
                 mControlView.setPosition(mDurationMs);
                 break;
@@ -257,13 +293,25 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
             setPlaying(false);
         } else {
             mMediaPlayer.play();
+            mCompleted = false;
             setPlaying(true);
         }
     }
 
     @Override
     public void onSeek(long positionMs) {
-        if (mMediaPlayer != null) mMediaPlayer.seekToPosition(positionMs / 1000f);
+        seekTo(positionMs);
+    }
+
+    /** 拖动进度条和双击快进/快退都走这里 */
+    private void seekTo(long positionMs) {
+        if (mMediaPlayer == null) return;
+        mMediaPlayer.seekToPosition(positionMs / 1000f);
+        if (mCompleted) {
+            // 播放器状态机：Completed --SeekTo--> Playing，界面同步成播放中
+            mCompleted = false;
+            setPlaying(true);
+        }
     }
 
     @Override
