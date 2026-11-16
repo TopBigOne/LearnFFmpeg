@@ -24,7 +24,6 @@ import androidx.core.app.ActivityCompat;
 
 import com.monday.av.media.FFMediaPlayer;
 import com.monday.av.media.MyGLSurfaceView;
-import com.byteflow.learnffmpeg.util.CommonUtils;
 
 import java.util.logging.LogManager;
 

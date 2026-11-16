@@ -96,11 +96,18 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /** 把 assets/byteflow 下的示例视频拷到 getExternalFilesDir()/byteflow，在后台线程执行，已完整拷贝的文件会跳过 */
     private void copyAssetsIfNeeded() {
         java.io.File filesDir = getExternalFilesDir(null);
-        if (filesDir != null) {
-            CommonUtils.copyAssetsDirToSDCard(this, "byteflow", filesDir.getAbsolutePath());
-        }
+        if (filesDir == null) return;
+        CommonUtils.copyAssetsDirAsync(this, "byteflow", filesDir, (copied, failed) -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (failed > 0) {
+                Toast.makeText(this, "示例视频拷贝失败 " + failed + " 个，可重新打开应用重试", Toast.LENGTH_LONG).show();
+            } else if (copied > 0) {
+                Toast.makeText(this, "示例视频已就绪（新增 " + copied + " 个）", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     @Override
