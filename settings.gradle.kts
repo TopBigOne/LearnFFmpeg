@@ -19,6 +19,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // CodeLocator 依赖的 RestrictionBypass 只发布在 JitPack；限定分组，其他依赖不去 JitPack 查
+        maven("https://jitpack.io") {
+            content { includeGroup("com.github.ChickenHook") }
+        }
     }
 }
 

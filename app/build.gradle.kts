@@ -1,3 +1,5 @@
+import org.gradle.kotlin.dsl.debugImplementation
+
 plugins {
     alias(libs.plugins.android.application)
 }
@@ -45,4 +47,6 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    debugImplementation(libs.codelocator.lancet.all)
+
 }
