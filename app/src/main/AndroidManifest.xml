@@ -26,8 +26,10 @@
         </activity>
         <activity android:name=".GLMediaPlayerActivity"
             android:screenOrientation="portrait"/>
+        <!-- 默认竖屏，点全屏按钮切横屏；configChanges 让旋转时页面不重建、播放不中断 -->
         <activity android:name=".NativeMediaPlayerActivity"
-            android:screenOrientation="portrait"/>
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"/>
         <activity android:name=".AudioVisualMediaPlayerActivity"
             android:screenOrientation="portrait"/>
         <activity android:name=".VRMediaPlayerActivity"

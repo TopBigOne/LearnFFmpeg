@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PlayerControlView 的内容，根布局是 PlayerControlView 自身（纵向 LinearLayout） -->
+<merge xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:parentTag="android.widget.LinearLayout"
+    tools:orientation="vertical">
+
+    <!-- 进度条：左右拖动 seek -->
+    <SeekBar
+        android:id="@+id/av_seek_bar"
+        android:layout_width="match_parent"
+        android:layout_height="24dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:maxHeight="3dp"
+        android:minHeight="3dp"
+        android:progressDrawable="@drawable/av_seek_progress"
+        android:thumb="@drawable/av_seek_thumb"
+        android:splitTrack="false"
+        android:background="@null" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="8dp">
+
+        <!-- 播放 / 暂停 -->
+        <ImageButton
+            android:id="@+id/av_btn_play_pause"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/av_bg_pill"
+            android:contentDescription="播放"
+            android:foreground="@drawable/av_bg_icon_button"
+            android:scaleType="center"
+            android:src="@drawable/av_ic_play" />
+
+        <!-- 上一个 / 下一个 -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/av_bg_pill"
+            android:orientation="horizontal"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp">
+
+            <ImageButton
+                android:id="@+id/av_btn_previous"
+                android:layout_width="40dp"
+                android:layout_height="44dp"
+                android:background="@drawable/av_bg_icon_button"
+                android:contentDescription="上一个"
+                android:scaleType="center"
+                android:src="@drawable/av_ic_skip_previous" />
+
+            <ImageButton
+                android:id="@+id/av_btn_next"
+                android:layout_width="40dp"
+                android:layout_height="44dp"
+                android:background="@drawable/av_bg_icon_button"
+                android:contentDescription="下一个"
+                android:scaleType="center"
+                android:src="@drawable/av_ic_skip_next" />
+        </LinearLayout>
+
+        <!-- 当前进度 / 总时长 -->
+        <TextView
+            android:id="@+id/av_tv_time"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/av_bg_pill"
+            android:fontFeatureSettings="tnum"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:singleLine="true"
+            android:text="0:00 / 0:00"
+            android:textColor="@color/av_player_text"
+            android:textSize="14sp" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- 右侧：倍速、横竖屏切换 -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:background="@drawable/av_bg_pill"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp">
+
+            <TextView
+                android:id="@+id/av_btn_speed"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:background="@drawable/av_bg_icon_button"
+                android:contentDescription="倍速"
+                android:gravity="center"
+                android:minWidth="48dp"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:text="1.0x"
+                android:textColor="@color/av_player_text"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            <ImageButton
+                android:id="@+id/av_btn_fullscreen"
+                android:layout_width="40dp"
+                android:layout_height="44dp"
+                android:background="@drawable/av_bg_icon_button"
+                android:contentDescription="全屏"
+                android:scaleType="center"
+                android:src="@drawable/av_ic_fullscreen" />
+        </LinearLayout>
+    </LinearLayout>
+</merge>

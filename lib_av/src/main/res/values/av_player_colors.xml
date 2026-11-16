@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="av_player_accent">#FFFF0033</color>          <!-- 已播放进度、拖动圆点 -->
+    <color name="av_player_track">#4DFFFFFF</color>           <!-- 进度条底色 -->
+    <color name="av_player_buffered">#80FFFFFF</color>        <!-- 预留：缓冲进度 -->
+    <color name="av_player_pill">#66000000</color>            <!-- 按钮组背景 -->
+    <color name="av_player_scrim_end">#B3000000</color>       <!-- 底部渐变，保证白色图标在亮画面上可见 -->
+    <color name="av_player_text">#FFFFFFFF</color>
+</resources>
