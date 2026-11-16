@@ -223,8 +223,8 @@ public class AudioRecorderActivity extends AppCompatActivity implements AudioRec
     }
 
     @Override
-    public void onAudioData(byte[] data, int dataSize) {
-        mFFMediaRecorder.onAudioData(data, dataSize);
+    public void onAudioData(byte[] data, int dataSize, long captureTimeNs) {
+        mFFMediaRecorder.onAudioData(data, dataSize, captureTimeNs);
     }
 
     @Override

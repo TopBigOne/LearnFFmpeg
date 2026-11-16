@@ -11,6 +11,9 @@
 // 编码线程等待新数据的超时时间：超时只是为了定期检查退出标志，有数据或停止时会被立即唤醒
 #define QUEUE_WAIT_TIMEOUT_MS 50
 
+// 单次纠偏的上限：超过它说明时间戳本身不可信（例如时基不一致），宁可不纠也不要塞进几分钟的静音
+#define MAX_AUDIO_CORRECTION_US 5000000
+
 static AVPixelFormat ToAVPixelFormat(int imageFormat) {
     switch (imageFormat) {
         case IMAGE_FORMAT_RGBA: return AV_PIX_FMT_RGBA;
@@ -100,7 +103,8 @@ int MediaRecorder::StartRecord() {
         return result;
     }
 
-    m_StartTime = GetSysCurrentTime();
+    // 两路时间戳的 0 点。必须在 m_Started 置位前确定：生产线程看到 m_Started 后就会读它
+    m_StartTimeUs = GetBootTimeUs();
     m_Started = true;
     // 音频、视频各一个编码线程，彼此不再互相等待
     if (m_EnableAudio) m_pAudioThread = new thread(AudioEncodeThread, this);
@@ -109,31 +113,42 @@ int MediaRecorder::StartRecord() {
 }
 
 /**
- * @brief 将音频帧添加到编码队列
+ * @brief 将音频帧添加到编码队列（AudioRecord 线程调用）
  */
-int MediaRecorder::OnFrame2Encode(AudioFrame *inputFrame) {
+int MediaRecorder::OnFrame2Encode(AudioFrame *inputFrame, int64_t captureTimeUs) {
     LOGCATV("MediaRecorder::OnFrame2Encode inputFrame->data=%p, inputFrame->dataSize=%d", inputFrame->data, inputFrame->dataSize);
     if (!m_Started || m_Exit || !m_EnableAudio) return 0;
-    // 记录到达时间，用于把音频起点与视频对齐
-    AudioFrame *pAudioFrame = new AudioFrame(inputFrame->data, inputFrame->dataSize, true,
-                                             GetSysCurrentTime() - m_StartTime);
-    AudioFrame *dropped = m_AudioFrameQueue.Push(pAudioFrame);
+    int64_t samples = inputFrame->dataSize / m_AudioBytesPerSample;
+    if (samples <= 0) return 0;
+    if (captureTimeUs == CAPTURE_TIME_UNKNOWN) {
+        // 调用方没给采集时间：这块的最后一个采样大约就是"现在"采到的，往前推一个块长。
+        // 交付延迟带来的抖动由编码线程的纠偏窗口过滤
+        captureTimeUs = GetBootTimeUs() - SamplesToUs(samples, m_RecorderParam.audioSampleRate);
+    }
+    // 给这块编号（在入队流中的采样序号）：被队列丢弃的块会在编号上留下缺口，编码线程据此原位补静音
+    int64_t samplePos = m_AudioPushedSamples.fetch_add(samples);
+    AudioChunk *chunk = new AudioChunk(inputFrame->data, static_cast<int>(samples * m_AudioBytesPerSample),
+                                       captureTimeUs, samplePos);
+    AudioChunk *dropped = m_AudioFrameQueue.Push(chunk);
     if (dropped) {
-        LOGCATE("MediaRecorder::OnFrame2Encode audio queue full, drop oldest frame");
+        LOGCATE("MediaRecorder::OnFrame2Encode audio queue full, drop oldest chunk (will be filled with silence)");
         delete dropped;
     }
     return 0;
 }
 
 /**
- * @brief 将视频帧添加到编码队列
+ * @brief 将视频帧添加到编码队列（GL 线程调用）
  */
-int MediaRecorder::OnFrame2Encode(NativeImage *inputFrame) {
+int MediaRecorder::OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs) {
     if (!m_Started || m_Exit || !m_EnableVideo) return 0;
     LOGCATV("MediaRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
+    if (captureTimeUs == CAPTURE_TIME_UNKNOWN) captureTimeUs = GetBootTimeUs();
+    // 点击开始之前就已采集的画面不属于本次录制（拷贝之前判断，省掉一次整帧拷贝）
+    if (captureTimeUs < m_StartTimeUs) return 0;
     VideoFrame *pFrame = ObtainVideoFrame(inputFrame->width, inputFrame->height, inputFrame->format);
     NativeImageUtil::CopyNativeImage(inputFrame, pFrame);
-    pFrame->timestamp = GetSysCurrentTime() - m_StartTime;
+    pFrame->captureTimeUs = captureTimeUs;
     VideoFrame *dropped = m_VideoFrameQueue.Push(pFrame);
     if (dropped) {
         // 编码跟不上：丢弃最旧的帧，避免内存无限增长
@@ -217,7 +232,7 @@ void MediaRecorder::Release() {
         NativeImageUtil::FreeNativeImage(pFrame);
         delete pFrame;
     }
-    while (AudioFrame *pAudio = m_AudioFrameQueue.Pop()) {
+    while (AudioChunk *pAudio = m_AudioFrameQueue.Pop()) {
         delete pAudio;
     }
     {
@@ -252,35 +267,21 @@ void MediaRecorder::Release() {
 /**
  * @brief 音频编码线程
  *
- * 队列中的 PCM 数据长度由 AudioRecord 决定，和编码器要求的帧长（AAC 为 1024 采样）不一致，
- * 先写入 FIFO，凑满一整帧再编码。
+ * 每块 PCM 先经过 ProcessAudioChunk 对齐到时间轴，再写入 FIFO：
+ * AudioRecord 每次给的采样数和编码器要求的帧长（AAC 为 1024 采样）不一致，凑满一整帧再编码。
  */
 void MediaRecorder::AudioEncodeThread(MediaRecorder *recorder) {
     LOGCATE("MediaRecorder::AudioEncodeThread start");
     AVOutputStream *aOs = &recorder->m_AudioStream;
-    int frameSize = aOs->m_pFrame->nb_samples;
-    int bytesPerSample = av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * aOs->m_pCodecCtx->channels;
-    bool firstFrame = true;
 
     for (;;) {
-        AudioFrame *audioFrame = recorder->m_AudioFrameQueue.WaitPop(QUEUE_WAIT_TIMEOUT_MS);
-        if (audioFrame) {
-            if (firstFrame) {
-                // 用第一块音频的到达时间作为音频起点，使音视频时间轴对齐
-                firstFrame = false;
-                if (audioFrame->pts > 0)
-                    aOs->m_SamplesCount = audioFrame->pts * aOs->m_pCodecCtx->sample_rate / 1000;
-            }
-            void *data = audioFrame->data;
-            av_audio_fifo_write(recorder->m_AudioFifo, &data, audioFrame->dataSize / bytesPerSample);
-            delete audioFrame;
+        AudioChunk *chunk = recorder->m_AudioFrameQueue.WaitPop(QUEUE_WAIT_TIMEOUT_MS);
+        if (chunk) {
+            recorder->ProcessAudioChunk(chunk);
+            delete chunk;
         } else if (recorder->m_Exit) {
             // 已停止且队列已空
             break;
-        }
-
-        while (av_audio_fifo_size(recorder->m_AudioFifo) >= frameSize) {
-            recorder->EncodeAudioSamples(frameSize);
         }
     }
 
@@ -289,6 +290,102 @@ void MediaRecorder::AudioEncodeThread(MediaRecorder *recorder) {
     if (remain > 0) recorder->EncodeAudioSamples(remain);
     recorder->EncodeAndWrite(aOs, nullptr);
     LOGCATE("MediaRecorder::AudioEncodeThread end");
+}
+
+void MediaRecorder::ProcessAudioChunk(AudioChunk *chunk) {
+    int sampleRate = m_AudioStream.m_pCodecCtx->sample_rate;
+    int64_t samples = chunk->dataSize / m_AudioBytesPerSample;
+
+    // 1. 队列满时丢弃的块：编号出现缺口，按缺失的采样数原位补静音。
+    //    原来直接丢掉，之后所有音频整体提前，每丢一次不同步就加重一分
+    int64_t lostSamples = chunk->samplePos - m_AudioNextSamplePos;
+    m_AudioNextSamplePos = chunk->samplePos + samples;
+    if (lostSamples > 0 && m_AudioAnchored) {
+        LOGCATE("MediaRecorder::ProcessAudioChunk %lld samples dropped by queue, fill with silence",
+                (long long) lostSamples);
+        AppendAudioSilence(lostSamples);
+    }
+
+    // 这块第一个采样"应该"落在时间轴上的时刻（待丢弃的采样会从本块开头扣掉，所以要减回去）
+    int64_t expectedUs = m_StartTimeUs + SamplesToUs(m_AudioTimelineSamples - m_AudioPendingSkip, sampleRate);
+    // 偏差 > 0：音频落后于采集时钟（时间轴上缺了数据）；< 0：音频超前
+    int64_t deviationUs = chunk->captureTimeUs - expectedUs;
+
+    if (!m_AudioAnchored) {
+        // 2. 开头对齐：起点到第一个采样之间补静音，起点之前采集的采样裁掉，音频从 0 开始
+        m_AudioAnchored = true;
+        LOGCATE("MediaRecorder::ProcessAudioChunk first audio at %lld us after start", (long long) deviationUs);
+        CorrectAudioTimeline(deviationUs);
+    } else {
+        // 3. 时钟漂移：声卡晶振和系统时钟有 ppm 级差异，按采样数推进的时间轴会慢慢偏离。
+        //    每个窗口取最小偏差（交付延迟只会让偏差变大），超过阈值时以系统时钟为准拉回
+        if (m_DriftWindowStartUs < 0) {
+            m_DriftWindowStartUs = chunk->captureTimeUs;
+            m_DriftWindowMinUs = deviationUs;
+        } else if (deviationUs < m_DriftWindowMinUs) {
+            m_DriftWindowMinUs = deviationUs;
+        }
+        if (chunk->captureTimeUs - m_DriftWindowStartUs >= AUDIO_DRIFT_WINDOW_US) {
+            if (llabs(m_DriftWindowMinUs) > AUDIO_DRIFT_THRESHOLD_US) {
+                LOGCATE("MediaRecorder::ProcessAudioChunk audio drift %lld us, correct it",
+                        (long long) m_DriftWindowMinUs);
+                CorrectAudioTimeline(m_DriftWindowMinUs);
+            }
+            m_DriftWindowStartUs = -1;
+        }
+    }
+
+    WriteAudioSamples(chunk->data, samples);
+}
+
+void MediaRecorder::CorrectAudioTimeline(int64_t deviationUs) {
+    if (llabs(deviationUs) > MAX_AUDIO_CORRECTION_US) {
+        LOGCATE("MediaRecorder::CorrectAudioTimeline deviation %lld us is implausible, ignore",
+                (long long) deviationUs);
+        return;
+    }
+    int64_t samples = UsToSamples(llabs(deviationUs), m_AudioStream.m_pCodecCtx->sample_rate);
+    if (deviationUs > 0) {
+        // 先抵消还没执行的丢弃，剩下的才补静音
+        int64_t cancel = std::min(samples, m_AudioPendingSkip);
+        m_AudioPendingSkip -= cancel;
+        AppendAudioSilence(samples - cancel);
+    } else {
+        // 从接下来的数据开头丢掉这些采样（可以跨多个块）
+        m_AudioPendingSkip += samples;
+    }
+}
+
+void MediaRecorder::AppendAudioSilence(int64_t samples) {
+    int blockSamples = static_cast<int>(m_SilenceBuffer.size() / m_AudioBytesPerSample);
+    while (samples > 0) {
+        int n = static_cast<int>(std::min<int64_t>(samples, blockSamples));
+        FeedAudioFifo(m_SilenceBuffer.data(), n);
+        samples -= n;
+    }
+}
+
+void MediaRecorder::WriteAudioSamples(const uint8_t *data, int64_t samples) {
+    int64_t skip = std::min(samples, m_AudioPendingSkip);
+    m_AudioPendingSkip -= skip;
+    if (samples - skip > 0) {
+        FeedAudioFifo(data + skip * m_AudioBytesPerSample, static_cast<int>(samples - skip));
+    }
+}
+
+void MediaRecorder::FeedAudioFifo(const uint8_t *data, int samples) {
+    void *planes[1] = {const_cast<uint8_t *>(data)};
+    int written = av_audio_fifo_write(m_AudioFifo, planes, samples);
+    if (written < samples) {
+        LOGCATE("MediaRecorder::FeedAudioFifo av_audio_fifo_write fail, written=%d", written);
+    }
+    if (written > 0) m_AudioTimelineSamples += written;
+
+    // m_pTmpFrame->nb_samples 是分配时的容量，即编码器要求的帧长
+    int frameSize = m_AudioStream.m_pTmpFrame->nb_samples;
+    while (av_audio_fifo_size(m_AudioFifo) >= frameSize) {
+        EncodeAudioSamples(frameSize);
+    }
 }
 
 /**
@@ -482,6 +579,9 @@ int MediaRecorder::OpenAudio(AVCodec *codec, AVOutputStream *ost) {
         LOGCATE("MediaRecorder::OpenAudio av_audio_fifo_alloc fail");
         return -1;
     }
+    m_AudioBytesPerSample = av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * c->channels;
+    // 补静音用：S16 的静音就是全 0，一帧长度，分块写入
+    m_SilenceBuffer.assign(static_cast<size_t>(nb_samples) * m_AudioBytesPerSample, 0);
     return 0;
 }
 
@@ -593,9 +693,12 @@ int MediaRecorder::EncodeVideoFrame(VideoFrame *videoFrame) {
     sws_scale(ost->m_pSwsCtx, srcData, srcLineSize, 0, videoFrame->height,
               ost->m_pFrame->data, ost->m_pFrame->linesize);
 
-    // pts 使用采集时间（毫秒），并保证严格递增
-    int64_t pts = videoFrame->timestamp;
-    if (pts <= ost->m_LastPts) pts = ost->m_LastPts + 1;
+    // pts = 采集时刻相对录制起点的毫秒数（time_base 1/1000）。
+    // 第一帧固定为 0：起点到第一帧之间沿用第一帧画面，文件不会以一段空白时间轴开头；
+    // 之后保证严格递增（同一毫秒内来两帧时 +1）
+    int64_t pts = (videoFrame->captureTimeUs - m_StartTimeUs) / 1000;
+    if (ost->m_LastPts < 0) pts = 0;
+    else if (pts <= ost->m_LastPts) pts = ost->m_LastPts + 1;
     ost->m_LastPts = pts;
     ost->m_pFrame->pts = pts;
 

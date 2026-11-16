@@ -44,7 +44,8 @@ using namespace std;
  * @param context 上下文指针
  * @param image 渲染后的图像数据
  */
-typedef void (*OnRenderFrameCallback)(void*, NativeImage*);
+// 回调参数：上下文、渲染结果、这帧画面的采集时刻（CLOCK_BOOTTIME 微秒，0 表示未知）
+typedef void (*OnRenderFrameCallback)(void*, NativeImage*, int64_t);
 
 /**
  * @brief OpenGL相机渲染器类
@@ -67,6 +68,12 @@ public:
      * @param pImage 视频帧图像数据
      */
     virtual void RenderVideoFrame(NativeImage *pImage);
+
+    /**
+     * @brief 渲染一帧视频，并记录它的采集时刻
+     * @param captureTimeUs 采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
+     */
+    void RenderVideoFrame(NativeImage *pImage, int64_t captureTimeUs);
 
     /**
      * @brief 反初始化，释放资源
@@ -194,7 +201,7 @@ private:
      * @brief 从FBO获取渲染帧
      * 读取FBO中的像素数据用于编码
      */
-    void GetRenderFrameFromFBO(int width, int height);
+    void GetRenderFrameFromFBO(int width, int height, int64_t captureTimeUs);
 
     /**
      * @brief 创建或更新滤镜素材纹理
@@ -222,6 +229,8 @@ private:
     GLuint m_DstFboId = GL_NONE;                   // 目标FBO ID
 
     NativeImage m_RenderImage;                      // 渲染图像数据缓冲
+    int64_t m_RenderImageTimeUs = 0;                // m_RenderImage 的采集时刻（受 m_Mutex 保护）
+    bool m_HasNewFrame = false;                     // 是否有尚未回读给录制模块的新画面（受 m_Mutex 保护）
     glm::mat4 m_MVPMatrix;                         // MVP变换矩阵（模型-视图-投影）
     TransformMatrix m_transformMatrix;              // 变换矩阵
 

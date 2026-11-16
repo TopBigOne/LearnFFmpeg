@@ -344,7 +344,8 @@ JNIEXPORT void JNICALL
 Java_com_monday_av_media_MediaRecorderContext_native_1OnAudioData(JNIEnv *env,
                                                                              jobject thiz,
                                                                              jbyteArray data,
-                                                                             jint size) {
+                                                                             jint size,
+                                                                             jlong capture_time_ns) {
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
     if(pContext == nullptr) return;
     // 只处理本次真正读到的 size 字节：AudioRecord.read 可能读不满整个数组，
@@ -355,7 +356,9 @@ Java_com_monday_av_media_MediaRecorderContext_native_1OnAudioData(JNIEnv *env,
     // 直接访问 Java 数组内存，录制模块入队时会拷贝一份；JNI_ABORT 表示无需写回
     jbyte *buf = env->GetByteArrayElements(data, nullptr);
     if(buf == nullptr) return;
-    pContext->OnAudioData(reinterpret_cast<uint8_t *>(buf), size);
+    // 采集时刻：Java 层给的是 CLOCK_BOOTTIME 纳秒，录制模块统一用微秒；<=0 表示未知
+    int64_t captureTimeUs = capture_time_ns > 0 ? capture_time_ns / 1000 : 0;
+    pContext->OnAudioData(reinterpret_cast<uint8_t *>(buf), size, captureTimeUs);
     env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
 }
 
@@ -375,13 +378,15 @@ Java_com_monday_av_media_MediaRecorderContext_native_1OnPreviewFrame(JNIEnv *env
                                                                                  jint format,
                                                                                  jbyteArray data,
                                                                                  jint width,
-                                                                                 jint height) {
+                                                                                 jint height,
+                                                                                 jlong capture_time_ns) {
     MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
     if(pContext == nullptr) return;
+    int64_t captureTimeUs = capture_time_ns > 0 ? capture_time_ns / 1000 : 0;
     // 直接访问 Java 数组内存，省掉一次 new[] + 整帧拷贝（渲染器内部会再拷贝一份）
     jbyte *buf = env->GetByteArrayElements(data, nullptr);
     if(buf == nullptr) return;
-    pContext->OnPreviewFrame(format, reinterpret_cast<uint8_t *>(buf), width, height);
+    pContext->OnPreviewFrame(format, reinterpret_cast<uint8_t *>(buf), width, height, captureTimeUs);
     env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
 }
 

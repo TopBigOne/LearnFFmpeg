@@ -76,8 +76,9 @@ public:
 	 * @brief OpenGL渲染帧回调（静态方法）
 	 * @param ctx 上下文指针
 	 * @param pImage 渲染的图像数据
+	 * @param captureTimeUs 画面的采集时刻（CLOCK_BOOTTIME 微秒）
 	 */
-	static void OnGLRenderFrame(void *ctx, NativeImage * pImage);
+	static void OnGLRenderFrame(void *ctx, NativeImage * pImage, int64_t captureTimeUs);
 
 	/**
 	 * @brief 初始化
@@ -107,8 +108,9 @@ public:
 	 * @brief 处理音频数据
 	 * @param pData 音频数据指针
 	 * @param size 数据大小
+	 * @param captureTimeUs 第一个采样的采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
 	 */
-    void OnAudioData(uint8_t *pData, int size);
+    void OnAudioData(uint8_t *pData, int size, int64_t captureTimeUs);
 
 	/**
 	 * @brief 处理预览帧数据
@@ -116,8 +118,9 @@ public:
 	 * @param pBuffer 图像数据缓冲区
 	 * @param width 图像宽度
 	 * @param height 图像高度
+	 * @param captureTimeUs 画面的采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
 	 */
-	void OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height);
+	void OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height, int64_t captureTimeUs);
 
 	/**
 	 * @brief 停止录制

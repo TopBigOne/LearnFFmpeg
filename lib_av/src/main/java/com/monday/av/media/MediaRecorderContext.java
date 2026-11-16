@@ -22,9 +22,15 @@ public abstract class MediaRecorderContext {
 
     protected native int native_StartRecord(int recorderType, String outUrl, int frameWidth, int frameHeight, long videoBitRate, int fps);
 
-    protected native void native_OnAudioData(byte[] data, int len);
+    /**
+     * @param captureTimeNs 第一个采样的采集时刻，SystemClock.elapsedRealtimeNanos() 时基；<=0 表示未知
+     */
+    protected native void native_OnAudioData(byte[] data, int len, long captureTimeNs);
 
-    protected native void native_OnPreviewFrame(int format, byte[] data, int width, int height);
+    /**
+     * @param captureTimeNs 画面的采集时刻，SystemClock.elapsedRealtimeNanos() 时基；<=0 表示未知
+     */
+    protected native void native_OnPreviewFrame(int format, byte[] data, int width, int height, long captureTimeNs);
 
     protected native int native_StopRecord();
 

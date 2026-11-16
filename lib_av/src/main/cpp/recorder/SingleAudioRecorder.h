@@ -22,6 +22,8 @@ extern "C" {
 }
 
 #include "ThreadSafeQueue.h"
+#include "AudioChunk.h"
+#include <vector>
 #include <thread>
 #include <atomic>
 #include "LogUtil.h"
@@ -94,10 +96,13 @@ private:
     /** 从 FIFO 取 nbSamples 个采样，转换格式后编码 */
     int EncodeSamples(int nbSamples);
 
+    /** 采样写入 FIFO，满一帧就编码 */
+    void FeedFifo(const uint8_t *data, int samples);
+
     /** 释放所有资源，可重复调用 */
     void Release();
 
-    ThreadSafeQueue<AudioFrame *> m_frameQueue{200}; // 音频帧队列，线程安全，满了丢弃最旧的
+    ThreadSafeQueue<AudioChunk *> m_frameQueue{200}; // 音频帧队列，线程安全，满了丢弃最旧的
     char m_outUrl[1024] = {0};                      // 输出文件路径
     int64_t m_samplesCount = 0;                     // 已编码的采样数，用于计算 pts
     int m_sampleRate;                               // 输入音频采样率
@@ -115,6 +120,10 @@ private:
     std::atomic<bool> m_started{false};             // 已成功开始录制
     std::atomic<bool> m_exit{false};                // 退出标志
     bool m_headerWritten = false;
+    int m_bytesPerSample = 0;                       // 输入 PCM 每个采样（含所有声道）的字节数
+    std::atomic<int64_t> m_pushedSamples{0};        // 生产端：已入队的采样总数，用于给每块编号
+    int64_t m_nextSamplePos = 0;                    // 消费端：期望的下一块编号，出现缺口说明队列丢了块
+    std::vector<uint8_t> m_silenceBuffer;           // 一帧长度的静音，用于填补被丢弃的块
 };
 
 

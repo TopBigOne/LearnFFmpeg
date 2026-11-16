@@ -25,6 +25,7 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.util.AndroidRuntimeException;
 import android.util.Log;
 import android.util.Size;
@@ -67,13 +68,21 @@ public class Camera2Wrapper {
     private Handler mBackgroundHandler;
     private HandlerThread mBackgroundThread;
 
+    /** 传感器时间戳是否已是 elapsedRealtimeNanos 时基（SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME） */
+    private volatile boolean mSensorTimestampRealtime = false;
+    /** 时基完全未知时，用第一帧的到达时间锚定得到的偏移；Long.MIN_VALUE 表示尚未锚定 */
+    private volatile long mUnknownClockOffsetNs = Long.MIN_VALUE;
+    /** 判断传感器时间戳是否为 CLOCK_MONOTONIC 时允许的最大采集延迟 */
+    private static final long MAX_CAPTURE_LATENCY_NS = 1_000_000_000L;
+
     private ImageReader.OnImageAvailableListener mOnPreviewImageAvailableListener = new ImageReader.OnImageAvailableListener() {
         @Override
         public void onImageAvailable(ImageReader reader) {
             Image image = reader.acquireLatestImage();
             if (image != null) {
                 if (mCamera2FrameCallback != null) {
-                    mCamera2FrameCallback.onPreviewFrame(CameraUtil.YUV_420_888_data(image), image.getWidth(), image.getHeight());
+                    long timestampNs = toElapsedRealtimeNanos(image.getTimestamp());
+                    mCamera2FrameCallback.onPreviewFrame(CameraUtil.YUV_420_888_data(image), image.getWidth(), image.getHeight(), timestampNs);
                 }
                 image.close();
             }
@@ -185,6 +194,37 @@ public class Camera2Wrapper {
         mSensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
         Log.d(TAG, "initCamera2Wrapper() called mSensorOrientation = " + mSensorOrientation);
 
+        // 不同摄像头的时间戳时基可能不同，切换摄像头时重新判断
+        Integer timestampSource = characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE);
+        mSensorTimestampRealtime = timestampSource != null
+                && timestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME;
+        mUnknownClockOffsetNs = Long.MIN_VALUE;
+        Log.d(TAG, "getCameraInfo() timestampSource = " + timestampSource);
+
+    }
+
+    /**
+     * 把 Image.getTimestamp()（传感器开始曝光的时刻）换算到 SystemClock.elapsedRealtimeNanos() 时基，
+     * 这样才能和 AudioRecord 给出的采集时刻放在同一条时间轴上。
+     *
+     * - REALTIME：本身就是 elapsedRealtimeNanos 时基，直接使用；
+     * - UNKNOWN：文档不保证时基，实际绝大多数设备是 CLOCK_MONOTONIC（即 System.nanoTime()）。
+     *   时间戳在"现在"之前且相差不到 1 秒，就按 MONOTONIC 处理，加上 BOOTTIME 与 MONOTONIC 的差值；
+     *   否则时基完全未知，用第一帧的到达时间锚定一次，之后保留传感器给出的精确帧间隔。
+     */
+    private long toElapsedRealtimeNanos(long sensorTimestampNs) {
+        if (mSensorTimestampRealtime) return sensorTimestampNs;
+
+        long monotonicNow = System.nanoTime();
+        long realtimeNow = SystemClock.elapsedRealtimeNanos();
+        long latency = monotonicNow - sensorTimestampNs;
+        if (latency >= 0 && latency < MAX_CAPTURE_LATENCY_NS) {
+            return sensorTimestampNs + (realtimeNow - monotonicNow);
+        }
+        if (mUnknownClockOffsetNs == Long.MIN_VALUE) {
+            mUnknownClockOffsetNs = realtimeNow - sensorTimestampNs;
+        }
+        return sensorTimestampNs + mUnknownClockOffsetNs;
     }
 
     private boolean checkCameraIdSupport(String cameraId) {

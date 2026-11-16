@@ -317,5 +317,6 @@ void VideoOutput::Present(const AVFrame *frame) {
     }
 
     m_Render->RenderVideoFrame(&image);
-    if (m_Recorder) m_Recorder->OnFrame2Encode(&image);
+    // 录的是"屏幕上看到的画面"，画面的上屏时刻就是它在录像里的时间，传未知让录制器取当前时间
+    if (m_Recorder) m_Recorder->OnFrame2Encode(&image, CAPTURE_TIME_UNKNOWN);
 }

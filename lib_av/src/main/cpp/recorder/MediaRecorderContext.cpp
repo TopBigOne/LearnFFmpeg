@@ -275,7 +275,7 @@ std::shared_ptr<MediaRecorder> MediaRecorderContext::GetAVRecorder() {
  * @param pData 音频数据指针
  * @param size 数据大小
  */
-void MediaRecorderContext::OnAudioData(uint8_t *pData, int size) {
+void MediaRecorderContext::OnAudioData(uint8_t *pData, int size, int64_t captureTimeUs) {
     LOGCATV("MediaRecorderContext::OnAudioData pData=%p, dataSize=%d", pData, size);
     // 原来这里不加锁，StopRecord 同时 delete 录制器会导致释放后使用。
     // 现在锁内复制 shared_ptr、锁外使用：即使此时 StopRecord，对象也会等这里用完才析构
@@ -285,7 +285,7 @@ void MediaRecorderContext::OnAudioData(uint8_t *pData, int size) {
 
     AudioFrame audioFrame(pData, size, false);
     if(audioRecorder) audioRecorder->OnFrame2Encode(&audioFrame);
-    if(avRecorder) avRecorder->OnFrame2Encode(&audioFrame);
+    if(avRecorder) avRecorder->OnFrame2Encode(&audioFrame, captureTimeUs);
 }
 
 /**
@@ -297,7 +297,7 @@ void MediaRecorderContext::OnAudioData(uint8_t *pData, int size) {
  *
  * 将相机预览帧传递给渲染器进行显示
  */
-void MediaRecorderContext::OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height)
+void MediaRecorderContext::OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height, int64_t captureTimeUs)
 {
 	LOGCATV("MediaRecorderContext::UpdateFrame format=%d, width=%d, height=%d, pData=%p",
 			format, width, height, pBuffer);
@@ -336,7 +336,7 @@ void MediaRecorderContext::OnPreviewFrame(int format, uint8_t *pBuffer, int widt
 
     //NativeImageUtil::DumpNativeImage(&nativeImage, "/sdcard", "camera");
     // 传递给渲染器
-    GLCameraRender::GetInstance()->RenderVideoFrame(&nativeImage);
+    GLCameraRender::GetInstance()->RenderVideoFrame(&nativeImage, captureTimeUs);
 }
 
 /**
@@ -398,16 +398,16 @@ void MediaRecorderContext::OnDrawFrame()
  *
  * 将渲染后的帧传递给录制器进行编码
  */
-void MediaRecorderContext::OnGLRenderFrame(void *ctx, NativeImage *pImage) {
+void MediaRecorderContext::OnGLRenderFrame(void *ctx, NativeImage *pImage, int64_t captureTimeUs) {
 	LOGCATV("MediaRecorderContext::OnGLRenderFrame ctx=%p, pImage=%p", ctx, pImage);
 	MediaRecorderContext *context = static_cast<MediaRecorderContext *>(ctx);
 	// 锁内复制指针、锁外入队，GL 线程不会被 StartRecord/StopRecord 卡住
 	std::shared_ptr<SingleVideoRecorder> videoRecorder = context->GetVideoRecorder();
 	std::shared_ptr<MediaRecorder> avRecorder = context->GetAVRecorder();
 	// 传递给单视频录制器
-	if(videoRecorder) videoRecorder->OnFrame2Encode(pImage);
+	if(videoRecorder) videoRecorder->OnFrame2Encode(pImage, captureTimeUs);
 	// 传递给音视频录制器
-	if(avRecorder) avRecorder->OnFrame2Encode(pImage);
+	if(avRecorder) avRecorder->OnFrame2Encode(pImage, captureTimeUs);
 }
 
 /**

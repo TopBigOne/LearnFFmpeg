@@ -52,14 +52,34 @@ public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceVi
         native_StartRecord(recorderType, outUrl, frameWidth, frameHeight, videoBitRate, fps);
     }
 
-    public void onPreviewFrame(int format, byte[] data, int width, int height) {
-        Log.d(TAG, "onPreviewFrame() called with: data = [" + data + "], width = [" + width + "], height = [" + height + "]");
-        native_OnPreviewFrame(format, data, width, height);
+    /**
+     * 送入一帧相机画面。
+     *
+     * @param captureTimeNs 画面的采集时刻，必须是 {@link android.os.SystemClock#elapsedRealtimeNanos()} 时基
+     *                      （Camera2 换算方法见 Camera2Wrapper）；传 0 表示未知，Native 层用到达时间近似
+     */
+    public void onPreviewFrame(int format, byte[] data, int width, int height, long captureTimeNs) {
+        native_OnPreviewFrame(format, data, width, height, captureTimeNs);
     }
 
+    /** 不带采集时刻的旧接口：以到达时间近似，音视频同步精度较差 */
+    public void onPreviewFrame(int format, byte[] data, int width, int height) {
+        onPreviewFrame(format, data, width, height, 0);
+    }
+
+    /**
+     * 送入一块 PCM。
+     *
+     * @param captureTimeNs 第一个采样的采集时刻，{@link android.os.SystemClock#elapsedRealtimeNanos()} 时基
+     *                      （见 AudioRecorder）；传 0 表示未知，Native 层用到达时间近似
+     */
+    public void onAudioData(byte[] data, int size, long captureTimeNs) {
+        native_OnAudioData(data, size, captureTimeNs);
+    }
+
+    /** 不带采集时刻的旧接口：以到达时间近似 */
     public void onAudioData(byte[] data, int size) {
-        Log.d(TAG, "onAudioData() called with: data = [" + data + "], size = [" + size + "]");
-        native_OnAudioData(data, size);
+        onAudioData(data, size, 0);
     }
 
     public void stopRecord() {

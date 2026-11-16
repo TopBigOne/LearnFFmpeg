@@ -147,7 +147,11 @@ void GLCameraRender::Init(int videoWidth, int videoHeight, int *dstSize) {
  * 如果尺寸变化，重新分配缓冲区
  */
 void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
-    LOGCATV("GLCameraRender::RenderVideoFrame pImage=%p", pImage);
+    RenderVideoFrame(pImage, 0);
+}
+
+void GLCameraRender::RenderVideoFrame(NativeImage *pImage, int64_t captureTimeUs) {
+    LOGCATV("GLCameraRender::RenderVideoFrame pImage=%p, captureTimeUs=%lld", pImage, (long long) captureTimeUs);
     if(pImage == nullptr || pImage->ppPlane[0] == nullptr)
         return;
     std::unique_lock<std::mutex> lock(m_Mutex);
@@ -165,6 +169,9 @@ void GLCameraRender::RenderVideoFrame(NativeImage *pImage) {
     }
 
     NativeImageUtil::CopyNativeImage(pImage, &m_RenderImage);
+    // 采集时刻跟着画面一起保存，回读给录制模块时原样带出去
+    m_RenderImageTimeUs = captureTimeUs;
+    m_HasNewFrame = true;
     //NativeImageUtil::DumpNativeImage(&m_RenderImage, "/sdcard", "camera");
 }
 
@@ -180,6 +187,8 @@ void GLCameraRender::UnInit() {
         memset(&m_ExtImage, 0, sizeof(NativeImage));
         NativeImageUtil::FreeNativeImage(&m_RenderImage);
         memset(&m_RenderImage, 0, sizeof(NativeImage));
+        m_RenderImageTimeUs = 0;
+        m_HasNewFrame = false;
         m_ExtImageChanged = false;
     }
 
@@ -490,6 +499,11 @@ void GLCameraRender::OnDrawFrame() {
     UploadTextures();
     int imageFormat = m_RenderImage.format;
     TransformMatrix transform = m_transformMatrix;
+    // 同一帧相机画面可能被重绘多次（Surface 变化、切换滤镜等都会触发 onDrawFrame），
+    // 只有新画面才回读给录制模块，否则同一画面会以相同采集时刻被编码两次
+    bool isNewFrame = m_HasNewFrame;
+    int64_t captureTimeUs = m_RenderImageTimeUs;
+    m_HasNewFrame = false;
     lock.unlock();
     // ---- 以下只使用局部副本和 GL 对象，不再持有锁 ----
 
@@ -567,7 +581,7 @@ void GLCameraRender::OnDrawFrame() {
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
 
     // 从FBO读取渲染结果，用于录制（仅录制时）。此时不持有图像锁，录制模块的回调不会卡住相机线程
-    GetRenderFrameFromFBO(outWidth, outHeight);
+    if (isNewFrame) GetRenderFrameFromFBO(outWidth, outHeight, captureTimeUs);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     // 第三步：渲染到屏幕
@@ -715,7 +729,7 @@ void GLCameraRender::UpdateFboTextureSize(int width, int height) {
  *
  * 使用glReadPixels从FBO读取RGBA数据，并通过回调函数传递给录制模块
  */
-void GLCameraRender::GetRenderFrameFromFBO(int width, int height) {
+void GLCameraRender::GetRenderFrameFromFBO(int width, int height, int64_t captureTimeUs) {
     // 不录制时不回读：glReadPixels 会让 CPU 同步等待 GPU 完成渲染，非常耗时
     if(!m_ReadbackEnabled) return;
 
@@ -734,7 +748,7 @@ void GLCameraRender::GetRenderFrameFromFBO(int width, int height) {
     nativeImage.ppPlane[0] = m_ReadbackBuffer.data();
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, nativeImage.ppPlane[0]);
     // 通过回调传递帧数据（录制模块会拷贝一份，回调返回后缓冲即可复用）
-    m_RenderFrameCallback(m_CallbackContext, &nativeImage);
+    m_RenderFrameCallback(m_CallbackContext, &nativeImage, captureTimeUs);
 }
 
 /**

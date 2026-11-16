@@ -154,7 +154,8 @@ int SingleVideoRecorder::StartRecord() {
     }
 
     // 初始化成功，启动编码线程
-    m_startTime = GetSysCurrentTime();
+    // pts 的 0 点。必须在 m_started 置位前确定：生产线程看到 m_started 后就会读它
+    m_startTimeUs = GetBootTimeUs();
     m_started = true;
     m_encodeThread = new thread(StartH264EncoderThread, this);
     return 0;
@@ -246,9 +247,11 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
                 sws_scale(recorder->m_SwsContext, srcData, srcLineSize, 0, pImage->height,
                           pFrame->data, pFrame->linesize);
 
-                // pts 使用采集时间，并保证严格递增
-                int64_t pts = pImage->timestamp;
-                if(pts <= recorder->m_lastPts) pts = recorder->m_lastPts + 1;
+                // pts = 采集时刻相对录制起点的毫秒数（time_base 1/1000）。
+                // 第一帧固定为 0，文件从 0 开始；之后保证严格递增
+                int64_t pts = (pImage->captureTimeUs - recorder->m_startTimeUs) / 1000;
+                if(recorder->m_lastPts < 0) pts = 0;
+                else if(pts <= recorder->m_lastPts) pts = recorder->m_lastPts + 1;
                 recorder->m_lastPts = pts;
                 pFrame->pts = pts;
                 recorder->EncodeFrame(pFrame);
@@ -265,8 +268,11 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
 /**
  * @brief 接收待编码的视频帧：复制一份并加入编码队列
  */
-int SingleVideoRecorder::OnFrame2Encode(NativeImage *inputFrame) {
+int SingleVideoRecorder::OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs) {
     if(!m_started || m_exit) return 0;
+    if(captureTimeUs == CAPTURE_TIME_UNKNOWN) captureTimeUs = GetBootTimeUs();
+    // 点击开始之前就已采集的画面不属于本次录制
+    if(captureTimeUs < m_startTimeUs) return 0;
     LOGCATV("SingleVideoRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
     // 分配新的图像并复制数据
     TimedImage *pImage = new TimedImage();
@@ -275,7 +281,7 @@ int SingleVideoRecorder::OnFrame2Encode(NativeImage *inputFrame) {
     pImage->format = inputFrame->format;
     NativeImageUtil::AllocNativeImage(pImage);
     NativeImageUtil::CopyNativeImage(inputFrame, pImage);
-    pImage->timestamp = GetSysCurrentTime() - m_startTime;
+    pImage->captureTimeUs = captureTimeUs;
     // 加入编码队列；编码跟不上时丢弃最旧的帧，避免内存无限增长
     TimedImage *dropped = m_frameQueue.Push(pImage);
     if(dropped) {

@@ -18,10 +18,14 @@
 #include <ImageDef.h>
 #include <render/audio/AudioRender.h>
 #include "ThreadSafeQueue.h"
+#include "RecorderClock.h"
+#include "AudioChunk.h"
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <vector>
+#include <algorithm>
+#include <cstdlib>
 
 extern "C" {
 #include <libavutil/avassert.h>
@@ -41,12 +45,18 @@ using namespace std;
 #define MAX_AUDIO_QUEUE_SIZE   200   // 音频帧队列上限
 #define MAX_VIDEO_FRAME_POOL   4     // 视频帧缓冲复用池大小
 
+// 音频时钟纠偏：每个窗口统计一次"采集时刻 - 音频时间轴位置"的最小偏差，超过阈值就补静音/丢采样。
+// 取窗口内最小值：交付延迟只会让采集时刻看起来更晚（正向抖动），最小值最接近真实偏差。
+#define AUDIO_DRIFT_WINDOW_US     1000000   // 统计窗口 1 秒
+#define AUDIO_DRIFT_THRESHOLD_US  40000     // 偏差超过 40ms 才纠正（低于人耳对口型不同步的感知门限）
+
 /**
  * @brief 待编码的视频帧：图像数据 + 采集时间戳
  */
 struct VideoFrame : public NativeImage {
-    int64_t timestamp = 0;   // 相对录制开始的采集时间（毫秒），用作视频 pts
+    int64_t captureTimeUs = 0;   // 采集时刻（CLOCK_BOOTTIME 微秒）
 };
+
 
 /**
  * @brief 输出流封装类
@@ -92,9 +102,14 @@ struct RecorderParam {
  *  - 消费者：音频、视频各一个编码线程，用阻塞队列等待数据（不再轮询），互不等待；
  *  - 两路编码线程写同一个文件，写包由 m_WriteMutex 串行，交错排序由 av_interleaved_write_frame 完成。
  *
- * 时间戳：
- *  - 视频 pts = 采集时间（相对录制开始的毫秒），相机掉帧时画面时长依然正确；
- *  - 音频 pts = 已编码采样数（time_base 1/sample_rate），起点按第一块音频数据的到达时间对齐。
+ * 时间戳（两路都以 StartRecord 时刻为 0 点，时钟统一为 CLOCK_BOOTTIME）：
+ *  - 视频 pts = 采集时刻 - 起点（毫秒）。用相机传感器时间戳而不是到达时间，消除渲染/回读延迟；
+ *    起点之前采集的帧丢弃，第一帧 pts 固定为 0，保证文件从 0 开始；
+ *  - 音频 pts = 时间轴上的采样序号（time_base 1/sample_rate），声卡时钟连续、无抖动。
+ *    时间轴与采集时刻保持一致：
+ *      1. 开头：起点到第一个采样之间补静音（起点前采集的采样裁掉）；
+ *      2. 队列丢块：按丢失的采样数原位补静音，后续音频不会整体提前；
+ *      3. 时钟漂移：按窗口统计偏差，超过阈值补静音或丢采样，以系统时钟为准把音频拉回。
  */
 class MediaRecorder {
 public:
@@ -105,9 +120,15 @@ public:
     /** @return 0 成功；负数失败（失败时已释放所有资源） */
     int StartRecord();
 
-    int OnFrame2Encode(AudioFrame *inputFrame);
+    /**
+     * @param captureTimeUs 第一个采样的采集时刻（CLOCK_BOOTTIME 微秒），CAPTURE_TIME_UNKNOWN 表示未知
+     */
+    int OnFrame2Encode(AudioFrame *inputFrame, int64_t captureTimeUs);
 
-    int OnFrame2Encode(NativeImage *inputFrame);
+    /**
+     * @param captureTimeUs 画面的采集时刻（CLOCK_BOOTTIME 微秒），CAPTURE_TIME_UNKNOWN 表示未知
+     */
+    int OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs);
 
     /** 停止录制：把队列里剩余的数据编码完、刷新编码器、写文件尾。可重复调用 */
     int StopRecord();
@@ -131,6 +152,21 @@ private:
 
     /** 从 FIFO 取 nbSamples 个采样编码 */
     int EncodeAudioSamples(int nbSamples);
+
+    /** 一块 PCM 进入音频时间轴：先按采集时间做对齐/补洞/纠偏，再写入 FIFO 并编码 */
+    void ProcessAudioChunk(AudioChunk *chunk);
+
+    /** 按偏差修正音频时间轴：正数补静音，负数记为待丢弃的采样 */
+    void CorrectAudioTimeline(int64_t deviationUs);
+
+    /** 向时间轴追加静音（分块写入并编码，内存占用有上限） */
+    void AppendAudioSilence(int64_t samples);
+
+    /** 写入一块 PCM：先扣掉待丢弃的采样，余下的进入时间轴 */
+    void WriteAudioSamples(const uint8_t *data, int64_t samples);
+
+    /** 采样写入 FIFO 并计入时间轴，满一帧就编码 */
+    void FeedAudioFifo(const uint8_t *data, int samples);
 
     int EncodeVideoFrame(VideoFrame *videoFrame);
 
@@ -158,7 +194,7 @@ private:
     AVAudioFifo     *m_AudioFifo = nullptr;        // 音频采样 FIFO：凑满编码器要求的帧长再编码
 
     ThreadSafeQueue<VideoFrame *> m_VideoFrameQueue{MAX_VIDEO_QUEUE_SIZE};
-    ThreadSafeQueue<AudioFrame *> m_AudioFrameQueue{MAX_AUDIO_QUEUE_SIZE};
+    ThreadSafeQueue<AudioChunk *> m_AudioFrameQueue{MAX_AUDIO_QUEUE_SIZE};
 
     std::mutex       m_FramePoolMutex;
     std::vector<VideoFrame *> m_FramePool;         // 视频帧缓冲复用池，避免每帧 malloc 一大块内存
@@ -170,7 +206,18 @@ private:
     bool             m_HeaderWritten = false;
     std::atomic<bool> m_Started{false};            // 已成功开始录制
     std::atomic<bool> m_Exit{false};               // 通知编码线程：不会再有新数据
-    int64_t          m_StartTime = 0;              // 录制开始的系统时间（毫秒）
+    int64_t          m_StartTimeUs = 0;            // 录制起点（CLOCK_BOOTTIME 微秒），两路时间戳的 0 点
+
+    // ---- 音频时间轴（仅音频编码线程访问）----
+    int              m_AudioBytesPerSample = 0;    // 输入 PCM 每个采样（含所有声道）的字节数
+    std::atomic<int64_t> m_AudioPushedSamples{0};  // 生产端：已入队的采样总数，用于给每块编号
+    int64_t          m_AudioNextSamplePos = 0;     // 消费端：期望的下一块编号
+    int64_t          m_AudioTimelineSamples = 0;   // 已进入时间轴的采样数（含补的静音，扣除丢弃的）
+    int64_t          m_AudioPendingSkip = 0;       // 待丢弃的采样数（音频超前时用）
+    bool             m_AudioAnchored = false;      // 是否已完成开头对齐
+    int64_t          m_DriftWindowStartUs = -1;    // 当前纠偏窗口的起始采集时刻
+    int64_t          m_DriftWindowMinUs = 0;       // 当前窗口内的最小偏差
+    std::vector<uint8_t> m_SilenceBuffer;          // 一帧长度的静音数据
 
     thread          *m_pAudioThread = nullptr;
     thread          *m_pVideoThread = nullptr;

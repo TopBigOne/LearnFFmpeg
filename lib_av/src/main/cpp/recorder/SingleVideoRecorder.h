@@ -19,6 +19,7 @@ extern "C" {
 }
 
 #include "ThreadSafeQueue.h"
+#include "RecorderClock.h"
 #include "ImageDef.h"
 #include <thread>
 #include <atomic>
@@ -60,9 +61,10 @@ public:
      * @brief 接收视频帧数据
      * 将视频帧添加到编码队列
      * @param inputFrame 输入的视频帧
+     * @param captureTimeUs 画面的采集时刻（CLOCK_BOOTTIME 微秒），CAPTURE_TIME_UNKNOWN 表示未知
      * @return 0表示成功，负数表示失败
      */
-    int OnFrame2Encode(NativeImage *inputFrame);
+    int OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs);
 
     /**
      * @brief 停止录制
@@ -88,7 +90,7 @@ private:
 private:
     /** 待编码的视频帧：图像 + 采集时间戳 */
     struct TimedImage : public NativeImage {
-        int64_t timestamp = 0;                      // 相对录制开始的毫秒数
+        int64_t captureTimeUs = 0;                  // 采集时刻（CLOCK_BOOTTIME 微秒）
     };
 
     /** 释放所有资源，可重复调用 */
@@ -99,7 +101,7 @@ private:
     int m_frameWidth;                               // 视频帧宽度
     int m_frameHeight;                              // 视频帧高度
     int64_t m_lastPts = -1;                         // 上一帧 pts，保证严格递增
-    int64_t m_startTime = 0;                        // 录制开始的系统时间（毫秒）
+    int64_t m_startTimeUs = 0;                      // 录制起点（CLOCK_BOOTTIME 微秒），pts 的 0 点
     long m_bitRate;                                 // 视频比特率
     int m_frameRate;                                // 视频帧率
     AVFrame  *m_pFrame = nullptr;                   // 编码帧缓冲（YUV420P）

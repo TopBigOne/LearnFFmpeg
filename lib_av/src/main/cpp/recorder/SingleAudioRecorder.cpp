@@ -158,7 +158,10 @@ int SingleAudioRecorder::StartRecord() {
         return result;
     }
 
-    // 初始化成功，启动编码线程
+    // 初始化成功，启动编码线程（m_started 置位前准备好生产端要用的字段）
+    m_bytesPerSample = av_get_bytes_per_sample(AVSampleFormat(m_sampleFormat))
+                       * av_get_channel_layout_nb_channels(m_channelLayout);
+    m_silenceBuffer.assign(static_cast<size_t>(m_pInFrame->nb_samples) * m_bytesPerSample, 0);
     m_started = true;
     m_encodeThread = new thread(StartAACEncoderThread, this);
     return 0;
@@ -170,10 +173,14 @@ int SingleAudioRecorder::StartRecord() {
 int SingleAudioRecorder::OnFrame2Encode(AudioFrame *inputFrame) {
     LOGCATV("SingleAudioRecorder::OnFrame2Encode inputFrame->data=%p, inputFrame->dataSize=%d", inputFrame->data, inputFrame->dataSize);
     if(!m_started || m_exit) return 0;
-    AudioFrame *pAudioFrame = new AudioFrame(inputFrame->data, inputFrame->dataSize);
-    AudioFrame *dropped = m_frameQueue.Push(pAudioFrame);
+    int64_t samples = inputFrame->dataSize / m_bytesPerSample;
+    if(samples <= 0) return 0;
+    // 按入队顺序给每块编号，编码线程据此发现被丢弃的块
+    int64_t samplePos = m_pushedSamples.fetch_add(samples);
+    AudioChunk *chunk = new AudioChunk(inputFrame->data, static_cast<int>(samples * m_bytesPerSample), 0, samplePos);
+    AudioChunk *dropped = m_frameQueue.Push(chunk);
     if(dropped) {
-        LOGCATE("SingleAudioRecorder::OnFrame2Encode queue full, drop oldest frame");
+        LOGCATE("SingleAudioRecorder::OnFrame2Encode queue full, drop oldest chunk (will be filled with silence)");
         delete dropped;
     }
     return 0;
@@ -204,7 +211,7 @@ int SingleAudioRecorder::StopRecord() {
 }
 
 void SingleAudioRecorder::Release() {
-    while (AudioFrame *pAudioFrame = m_frameQueue.Pop()) {
+    while (AudioChunk *pAudioFrame = m_frameQueue.Pop()) {
         delete pAudioFrame;
     }
 
@@ -231,27 +238,46 @@ void SingleAudioRecorder::Release() {
  */
 void SingleAudioRecorder::StartAACEncoderThread(SingleAudioRecorder *recorder) {
     LOGCATE("SingleAudioRecorder::StartAACEncoderThread start");
-    int frameSize = recorder->m_pFrame->nb_samples;
-    int bytesPerSample = av_get_bytes_per_sample(AVSampleFormat(recorder->m_sampleFormat))
-                         * av_get_channel_layout_nb_channels(recorder->m_channelLayout);
+    int blockSamples = static_cast<int>(recorder->m_silenceBuffer.size() / recorder->m_bytesPerSample);
     for(;;)
     {
-        AudioFrame *audioFrame = recorder->m_frameQueue.WaitPop(50);
-        if(audioFrame == nullptr) {
+        AudioChunk *chunk = recorder->m_frameQueue.WaitPop(50);
+        if(chunk == nullptr) {
             if(recorder->m_exit) break;   // 已停止且队列为空
             continue;
         }
 
-        void *data = audioFrame->data;
-        av_audio_fifo_write(recorder->m_pFifo, &data, audioFrame->dataSize / bytesPerSample);
-        delete audioFrame;
-
-        while(av_audio_fifo_size(recorder->m_pFifo) >= frameSize) {
-            recorder->EncodeSamples(frameSize);
+        int64_t samples = chunk->dataSize / recorder->m_bytesPerSample;
+        // 队列满时丢弃的块：按缺失的采样数原位补静音，录音时长和真实时长保持一致
+        // （原来直接丢掉，录 10 秒可能只剩 9 秒，后面的声音整体提前）
+        int64_t lost = chunk->samplePos - recorder->m_nextSamplePos;
+        if(lost > 0) {
+            LOGCATE("SingleAudioRecorder::StartAACEncoderThread %lld samples dropped by queue, fill with silence", (long long) lost);
+            while(lost > 0) {
+                int n = static_cast<int>(lost < blockSamples ? lost : blockSamples);
+                recorder->FeedFifo(recorder->m_silenceBuffer.data(), n);
+                lost -= n;
+            }
         }
+        recorder->m_nextSamplePos = chunk->samplePos + samples;
+
+        recorder->FeedFifo(chunk->data, static_cast<int>(samples));
+        delete chunk;
     }
 
     LOGCATE("SingleAudioRecorder::StartAACEncoderThread end");
+}
+
+void SingleAudioRecorder::FeedFifo(const uint8_t *data, int samples) {
+    void *planes[1] = {const_cast<uint8_t *>(data)};
+    if(av_audio_fifo_write(m_pFifo, planes, samples) < samples) {
+        LOGCATE("SingleAudioRecorder::FeedFifo av_audio_fifo_write fail");
+    }
+    // m_pInFrame->nb_samples 是分配时的容量，即编码器要求的帧长
+    int frameSize = m_pInFrame->nb_samples;
+    while(av_audio_fifo_size(m_pFifo) >= frameSize) {
+        EncodeSamples(frameSize);
+    }
 }
 
 int SingleAudioRecorder::EncodeSamples(int nbSamples) {

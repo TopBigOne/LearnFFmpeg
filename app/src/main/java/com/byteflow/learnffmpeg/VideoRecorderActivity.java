@@ -187,9 +187,9 @@ public class VideoRecorderActivity extends AppCompatActivity implements Camera2F
     }
 
     @Override
-    public void onPreviewFrame(byte[] data, int width, int height) {
-        Log.d(TAG, "onPreviewFrame() called with: data = [" + data + "], width = [" + width + "], height = [" + height + "]");
-        mMediaRecorder.onPreviewFrame(IMAGE_FORMAT_I420, data, width, height);
+    public void onPreviewFrame(byte[] data, int width, int height, long timestampNs) {
+        // 带上传感器采集时刻：录制时用它打视频 pts，而不是渲染回读完成的时间
+        mMediaRecorder.onPreviewFrame(IMAGE_FORMAT_I420, data, width, height, timestampNs);
         mMediaRecorder.requestRender();
     }
 
