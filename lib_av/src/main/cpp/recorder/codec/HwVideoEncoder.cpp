@@ -5,7 +5,6 @@
 #include "codec/HwVideoEncoder.h"
 #include "common/RecorderClock.h"
 #include <LogUtil.h>
-#include <dlfcn.h>
 #include <cstring>
 #include <libyuv.h>
 #include <media/NdkMediaFormat.h>
@@ -21,32 +20,6 @@ const uint32_t kBufferFlagKeyFrame = 1;                  // AMEDIACODEC_BUFFER_F
 const int64_t kDequeueTimeoutUs = 10000;
 const int64_t kInputTimeoutUs = 20000;                   // Buffer 模式等待空闲输入缓冲的时间
 const int64_t kEosWaitUs = 2000000;                      // 停止时最多等 2 秒拿到 EOS
-
-/** API 26+ / 28+ 的函数，minSdk 23 不能直接链接，运行时查找 */
-struct MediaCodecApi {
-    media_status_t (*createInputSurface)(AMediaCodec *, ANativeWindow **) = nullptr;   // API 26
-    media_status_t (*signalEndOfInputStream)(AMediaCodec *) = nullptr;                 // API 26
-    media_status_t (*getName)(AMediaCodec *, char **) = nullptr;                       // API 28
-    void (*releaseName)(AMediaCodec *, char *) = nullptr;                              // API 28
-    AMediaFormat *(*getInputFormat)(AMediaCodec *) = nullptr;                          // API 28
-};
-
-const MediaCodecApi &GetApi() {
-    static MediaCodecApi api = [] {
-        MediaCodecApi a;
-        void *lib = dlopen("libmediandk.so", RTLD_NOW);
-        if (lib != nullptr) {
-            a.createInputSurface = reinterpret_cast<decltype(a.createInputSurface)>(dlsym(lib, "AMediaCodec_createInputSurface"));
-            a.signalEndOfInputStream = reinterpret_cast<decltype(a.signalEndOfInputStream)>(dlsym(lib, "AMediaCodec_signalEndOfInputStream"));
-            a.getName = reinterpret_cast<decltype(a.getName)>(dlsym(lib, "AMediaCodec_getName"));
-            a.releaseName = reinterpret_cast<decltype(a.releaseName)>(dlsym(lib, "AMediaCodec_releaseName"));
-            a.getInputFormat = reinterpret_cast<decltype(a.getInputFormat)>(dlsym(lib, "AMediaCodec_getInputFormat"));
-            // 不 dlclose：libmediandk 本来就被本库链接，常驻进程
-        }
-        return a;
-    }();
-    return api;
-}
 
 /** Google 自带的软件编码器，名字有固定前缀 */
 bool IsSoftwareCodec(const std::string &name) {
@@ -65,8 +38,7 @@ HwVideoEncoder::~HwVideoEncoder() {
 }
 
 bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, int fps) {
-    const MediaCodecApi &api = GetApi();
-    if (mode == InputMode::Surface && (api.createInputSurface == nullptr || api.signalEndOfInputStream == nullptr)) {
+    if (mode == InputMode::Surface && !__builtin_available(android 26, *)) {
         LOGCATE("HwVideoEncoder::Open Surface input requires Android 8.0+, fall back to software");
         return false;
     }
@@ -87,7 +59,11 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
     if (!configured) return false;
 
     if (mode == InputMode::Surface) {
-        media_status_t status = api.createInputSurface(m_Codec, &m_InputWindow);
+        // 上面已确认 API 26+；__builtin_available 不能跨语句传递，这里再守卫一次（编译期要求，运行时开销可忽略）
+        media_status_t status = AMEDIA_ERROR_UNSUPPORTED;
+        if (__builtin_available(android 26, *)) {
+            status = AMediaCodec_createInputSurface(m_Codec, &m_InputWindow);
+        }
         if (status != AMEDIA_OK || m_InputWindow == nullptr) {
             LOGCATE("HwVideoEncoder::Open createInputSurface fail status=%d", status);
             Release();
@@ -106,8 +82,8 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
         // 输入缓冲的行宽、Y 平面行数：编码器可能要求对齐（例如 16 或 64），以编码器给出的为准
         m_Stride = width;
         m_SliceHeight = height;
-        if (api.getInputFormat != nullptr) {
-            AMediaFormat *inputFormat = api.getInputFormat(m_Codec);
+        if (__builtin_available(android 28, *)) {
+            AMediaFormat *inputFormat = AMediaCodec_getInputFormat(m_Codec);
             if (inputFormat != nullptr) {
                 int32_t stride = 0, sliceHeight = 0;
                 if (AMediaFormat_getInt32(inputFormat, "stride", &stride) && stride >= width) m_Stride = stride;
@@ -130,13 +106,12 @@ bool HwVideoEncoder::Configure(int width, int height, int bitRate, int fps, int3
         return false;
     }
 
-    const MediaCodecApi &api = GetApi();
     m_Name.clear();
-    if (api.getName != nullptr) {
+    if (__builtin_available(android 28, *)) {
         char *name = nullptr;
-        if (api.getName(m_Codec, &name) == AMEDIA_OK && name != nullptr) {
+        if (AMediaCodec_getName(m_Codec, &name) == AMEDIA_OK && name != nullptr) {
             m_Name = name;
-            if (api.releaseName != nullptr) api.releaseName(m_Codec, name);
+            AMediaCodec_releaseName(m_Codec, name);
         }
     }
     LOGCATE("HwVideoEncoder::Configure encoder=%s [w,h]=[%d,%d] bitRate=%d fps=%d colorFormat=0x%x",
@@ -227,7 +202,10 @@ bool HwVideoEncoder::EncodeImage(const NativeImage &image, int64_t ptsUs) {
 
 void HwVideoEncoder::SignalEndOfStream() {
     if (m_Mode == InputMode::Surface) {
-        media_status_t status = GetApi().signalEndOfInputStream(m_Codec);
+        media_status_t status = AMEDIA_ERROR_UNSUPPORTED;
+        if (__builtin_available(android 26, *)) {   // Surface 模式只在 API 26+ 打开成功，这里恒为真
+            status = AMediaCodec_signalEndOfInputStream(m_Codec);
+        }
         if (status != AMEDIA_OK) {
             LOGCATE("HwVideoEncoder::SignalEndOfStream signalEndOfInputStream fail status=%d", status);
         }
