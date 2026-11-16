@@ -5,7 +5,9 @@
 
 每个阶段都要能独立编译、能播放，再进入下一阶段。勾选框用来记录进度。
 
-> **当前状态（2026-11-15）**：阶段 1 的代码修改已完成（提交 `7bb6cb2`、`3c777b8`、`4c14f16`、`174da6b`）。阶段 2 的代码已完成（提交 `2321156`、`f940420`、`c3aacc0`、`e302066`）：软解播放器改为单 Demuxer + serial 包/帧队列 + 独立视频刷新线程 + 控制线程状态机 + 单一 JNI 回调线程，两个 ABI 编译通过、`assembleDebug` 通过。**阶段 1、2 均未真机验收**（没有设备），验收项与需要重点验证的风险点见阶段 2 末尾。阶段 3、4、6 中有几项已顺带完成或部分完成，见各条备注。
+> **当前状态（2026-11-16）**：阶段 3 的代码已完成（提交 `f5a9a26`、`342c521`、`f29df8d`）：音频输出换成 Oboe（AAudio 时间戳校正音频时钟、设备断开自动重连），接入 sonic 实现 0.25～4.0 倍速，`assembleDebug` / `assembleRelease` 通过，同样**未真机验收**，验证项见阶段 3。
+>
+> **此前（2026-11-15）**：阶段 1 的代码修改已完成（提交 `7bb6cb2`、`3c777b8`、`4c14f16`、`174da6b`）。阶段 2 的代码已完成（提交 `2321156`、`f940420`、`c3aacc0`、`e302066`）：软解播放器改为单 Demuxer + serial 包/帧队列 + 独立视频刷新线程 + 控制线程状态机 + 单一 JNI 回调线程，两个 ABI 编译通过、`assembleDebug` 通过。**阶段 1、2 均未真机验收**（没有设备），验收项与需要重点验证的风险点见阶段 2 末尾。阶段 3、4、6 中有几项已顺带完成或部分完成，见各条备注。
 
 ---
 
@@ -70,14 +72,14 @@ player/
   core/FFPtr.h  PacketQueue  FrameQueue  Clock  AVSync.h   # AVSync：音频/视频/外部三时钟 + 主时钟选择
   demux/Demuxer                                            # 唯一的 AVFormatContext + 读包线程
   decoder/Decoder  AudioDecoder  VideoDecoder              # Decoder：send/receive 状态机 + 解码线程
-  output/AudioOutput.h  OpenSLAudioOutput  AudioPlayback   # AudioPlayback：帧队列 → 重采样 → 设备，音频时钟
+  output/AudioOutput.h  OboeAudioOutput  AudioPlayback     # AudioPlayback：帧队列 → 重采样 → sonic 变速 → 设备，音频时钟
   output/VideoOutput                                       # 视频刷新线程 + 呈现 + 边播边录
   Player                                                   # 状态机 + 控制线程（计划中的 Player.h/.cpp）
   JniEventDispatcher                                       # 唯一回调 Java 的线程
   FFMediaPlayer                                            # MediaPlayer 接口的 JNI 适配层，持有 Player
 ```
 
-计划中的 `output/VideoRenderer.h` 没有新建，直接复用已有的 `render/video/VideoRender` 接口；`OboeAudioOutput` 属于阶段 3。
+计划中的 `output/VideoRenderer.h` 没有新建，直接复用已有的 `render/video/VideoRender` 接口。阶段 3 用 `OboeAudioOutput` 取代了 `OpenSLAudioOutput`（已删除），第三方源码在 `cpp/thirdparty/`。
 
 线程与锁（自查结论，供真机验证时对照）：
 
@@ -87,10 +89,11 @@ player/
 | 读包线程 | `av_read_frame`/`avformat_seek_file`；缓冲满时 10ms 定时等待 | `Demuxer::Abort`（标志 + notify）+ interrupt_callback |
 | 音/视频解码线程 | `PacketQueue::Get`、`FrameQueue::PeekWritable` | 两个队列 `Abort()` |
 | 视频刷新线程 | ≤10ms 的定时等待；显示时的 `RenderVideoFrame`/`ANativeWindow_lock` | `m_Quit` + notify；显示本身有界 |
-| OpenSL 回调线程 | 从不阻塞（帧队列空就补静音） | `Close()` 中 `Destroy` 等待回调返回 |
+| Oboe 数据回调线程 | 从不阻塞（帧队列空就补静音）；只有 `FrameQueue`/`Clock` 内部的短临界区 | `Close()` 中同步的 `stop()` 等待回调返回 |
+| Oboe 错误回调线程 | 设备断开后重新打开流 | `Close()` 置 `m_Closed`；`Callback::Detach` 等重连结束 |
 | JNI 分发线程 | 事件队列条件变量；Java 回调本身 | `m_Quit` + notify；Java 回调 300ms 不返回则 detach |
 
-锁都是叶子锁（持有期间不再获取其他播放器锁），唯一的嵌套是刷新线程持 `VideoOutput::m_Mutex` 时调用 FrameQueue/Clock（二者内部锁不会反向获取它）；显示（Present）在锁外进行。Teardown 顺序：Abort 全部队列 → 停刷新线程（并停录制）→ 关闭 OpenSL → 停解码线程 → join 读包线程。
+锁都是叶子锁（持有期间不再获取其他播放器锁），唯一的嵌套是刷新线程持 `VideoOutput::m_Mutex` 时调用 FrameQueue/Clock（二者内部锁不会反向获取它）；显示（Present）在锁外进行。Teardown 顺序：Abort 全部队列 → 停刷新线程（并停录制）→ 关闭音频设备 → 停解码线程 → join 读包线程。
 
 ### 任务
 
@@ -114,7 +117,7 @@ player/
 - [x] `Player` 状态机：Idle → Preparing → Prepared → Playing ⇄ Paused → Completed / Error → Released；所有对外接口投递到控制线程串行执行
   - 额外有 `Stopped`（stop 后可再 play，会重新 prepare）。`init()` 后立即异步 prepare；prepare 完成前调用的 play/seek 会在完成后执行
   - prepare 后以暂停状态启动整条流水线（提前缓冲、显示首帧）；Completed 时暂停输出，再 play 从头播放，seek 则继续播放（与旧版行为一致）
-  - 播放完成判断：各流解码器 `finished == 当前 serial` 且帧队列、OpenSL 队列中都没有真实数据
+  - 播放完成判断：各流解码器 `finished == 当前 serial` 且帧队列、设备缓冲中都没有真实数据（阶段 3 起还包括 sonic 内部的积压）
   - `Release()` 同步：置中断标志 → 投递 Release → join 控制线程；工作线程投递的命令带会话 id，stop 后旧会话的命令被忽略
 - [x] JNI 层改为只和 `Player` 交互，回调统一走一个消息分发线程（避免在解码线程里直接调 Java）
   - `JniEventDispatcher`：线程只 Attach 一次；进度、渲染请求在队列里合并；关闭时最多等 300ms，Java 回调卡住则 detach，避免 release 死锁
@@ -126,25 +129,48 @@ player/
 - 任意状态下调用 release，1 秒内返回，无泄漏（ASan LeakSanitizer）；日志 `FFMediaPlayer::UnInit done in Xms`
 
 **真机重点验证**（风险最高处）：
-1. OpenSL `Destroy` 是否确实等待正在执行的回调返回（`Close()` 依赖它保证回调不再访问已销毁的 AudioPlayback）；以及 3 × 1024 帧缓冲在低端机上是否欠载
+1. ~~OpenSL `Destroy` 是否等待回调返回~~（阶段 3 已换成 Oboe，见阶段 3 的验证项）
 2. 开启边播边录（StreamMediaPlayerActivity）时 release 耗时：`SingleVideoRecorder::StopRecord` 要编码完队列里最多 15 帧，可能超过 1 秒
-3. 音画同步：音频时钟未扣除设备输出延迟，画面可能早于声音几十毫秒（阶段 3）；无音轨文件走外部时钟
+3. 音画同步：~~音频时钟未扣除设备输出延迟~~（阶段 3 已用 AAudio 时间戳校正）；无音轨文件走外部时钟
 4. 暂停中 seek、prepare 后首帧预览、Completed 后 play/seek 的状态切换
 5. 网络流：超时值（20s/15s）是否合适，RTSP 暂停/恢复
 
 ## 阶段 3：同步与音频输出
 
-- [ ] 音频输出换成 Oboe（AAudio 优先，低版本回退 OpenSL）；回调中不加锁、不分配内存，从无锁环形缓冲读数据，不够时补静音
-- [ ] 音频时钟 = 已写入数据的末尾 pts − 设备中待播时长；用 `getTimestamp` 校正延迟
-  - 部分完成：OpenSL 版本在每块缓冲开始播放时以块首样本 pts 设置时钟（已扣除 OpenSL 队列中的待播数据），但没有扣除混音器/硬件的输出延迟
+- [x] 音频输出换成 Oboe（AAudio 优先，低版本回退 OpenSL）；回调中不加锁、不分配内存，从无锁环形缓冲读数据，不够时补静音
+  - `output/OboeAudioOutput`：Oboe 1.9.3 以源码编进 `learn-ffmpeg`（NDK 21 + `c++_static`，不用 Gradle 预编译包，原因见 `cpp/thirdparty/README.md`）；工程因 Oboe 头文件升级到 C++17
+  - 采样率用设备原生值（通常 48kHz），swr 一次重采样到位；普通性能模式（媒体播放不需要低延迟模式）；`Usage::Media` / `ContentType::Movie`
+  - 设备断开（插拔耳机、切蓝牙）在错误回调线程自动重开，原来在播放就继续播；新设备采样率不同时通过 `OnRender` 的参数告诉上层，重建重采样器
+  - **与计划的差异**：没有做 "解码线程写无锁环形缓冲、回调只读缓冲"，仍是 ffplay 式的拉模式——回调里取帧、重采样、变速。理由：环形缓冲会让 seek 后的旧数据和 pts 映射变复杂，而现在回调里只有 `FrameQueue`/`Clock` 的极短临界区（生产者也只持锁做指针操作），没有阻塞等待；分配只发生在帧变长（`av_fast_malloc`）和 seek（sonic 清空）时。如果真机上出现回调超时导致的爆音，再改成环形缓冲
+- [x] 音频时钟 = 已写入数据的末尾 pts − 设备中待播时长；用 `getTimestamp` 校正延迟
+  - 每次回调由输出估算本块第一帧的播出时刻：AAudio 用 `getTimestamp(CLOCK_MONOTONIC)` 的 (帧序号, 时刻) 加上 `getFramesWritten` 推算，已包含混音器和硬件延迟；OpenSL ES（Android 8.1 以下）没有可靠时间戳，按 "当前时刻 + 设备缓冲时长" 估算
+  - `Clock` 允许锚点时刻晚于当前时刻（"这块数据将在何时播出"），外推公式不变
 - [x] 视频渲染线程按 ffplay `compute_target_delay` 逻辑追音频时钟：落后丢帧、超前等待，不在解码线程 sleep
-  - 阶段 2 一并完成：`output/VideoOutput` 刷新线程 + 视频解码线程提前丢帧；未经真机同步测试- [x] 无音轨时主时钟退回外部时钟（系统时钟）
+  - 阶段 2 一并完成：`output/VideoOutput` 刷新线程 + 视频解码线程提前丢帧；未经真机同步测试
+- [x] 无音轨时主时钟退回外部时钟（系统时钟）
 - [x] 暂停/恢复时时钟正确冻结和继续
-- [ ] 倍速播放：音频接入 sonic 或 soundtouch（变速不变调），时钟按倍速推进
+  - 阶段 3 起音频设备暂停是同步的（`pause()` 等到 Paused 状态），之后不会再有回调去推动已冻结的音频时钟
+- [x] 倍速播放：音频接入 sonic 或 soundtouch（变速不变调），时钟按倍速推进
+  - sonic（单文件 C，Apache 2.0）以源码引入；范围 0.25～4.0。解码出的 PCM 全部经过 sonic，1.0x 时透传无延迟
+  - pts 映射：下一个输出样本的 pts = 最后送入样本之后的 pts − 仍在 sonic 里的媒体时长；切换倍速时先按旧速度冲出积压数据，这部分按旧速度计时；播放结束时冲出尾巴，否则最后几十毫秒丢失、播放无法判定完成
+  - 时钟：音频时钟的速度随每块数据设置（设备缓冲里的旧速度数据播完后才切换）；视频时钟、外部时钟立即切换；视频刷新线程把帧间隔和时钟偏差除以倍速换算成真实时间
+  - 接口：`Player::SetSpeed` → `FFMediaPlayer.setPlaybackSpeed(float)`（返回是否支持，硬解播放器不支持）；任意状态可设置，stop 后重播保持。`NativeMediaPlayerActivity` 右上角按钮在 0.5～2.0x 间切换
 
-**验收**：
+**验收**（未完成，没有真机）：
 - 用音画同步测试视频（闪光+哔声）录屏检查，偏差稳定在 ±40ms 内
 - 0.5x / 1.0x / 2.0x 下同步正常，暂停 10 分钟恢复后不跳帧、不追帧
+
+**真机重点验证**：
+1. 日志 `OboeAudioOutput::OpenStream AAudio, 48000Hz ...` 确认走的是 AAudio；Android 8.1 以下应为 OpenSLES
+2. 播放中插拔耳机 / 连接断开蓝牙：日志出现 `stream closed by error ... reopen`，声音继续、画面不卡；蓝牙通常 44.1kHz，确认 `output sample rate 48000 -> 44100` 后音调正常
+3. 倍速：0.5x 和 2.0x 下声音不变调、无明显杂音；播放中来回切换倍速，切换瞬间不应有长时间的音画错位（理论上只有设备缓冲长度量级，几十毫秒）
+4. 倍速播到结尾能正常触发 `MSG_DECODER_DONE`（依赖结尾冲出 sonic 积压）
+5. 低端机上回调是否超时爆音（logcat 中 AAudio 的 underrun 计数，或 `adb shell dumpsys media.audio_flinger` 的 underruns）
+6. 音频可视化页面（AudioVisualMediaPlayerActivity）的波形：现在每攒满 1024 个立体声样本更新一次，而不是每次回调更新
+
+**已知不足**：
+- seek 时设备缓冲中的旧数据仍会播完（几十毫秒），没有做 `pause → flush → start`
+- 音频比视频先结束时，音频时钟停在最后一个样本处，剩下的视频会按 "超前" 处理（每帧等待加倍）直到偏差超过最大帧间隔；ffplay 也有同样的行为，常见文件音视频长度差在 100ms 以内，影响不大
 
 ## 阶段 4：解码与渲染完善
 
