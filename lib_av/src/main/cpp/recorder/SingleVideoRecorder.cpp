@@ -8,6 +8,7 @@
 
 
 #include "SingleVideoRecorder.h"
+#include "RecorderMuxer.h"
 
 extern "C" {
 #include <libavutil/opt.h>
@@ -137,7 +138,7 @@ int SingleVideoRecorder::StartRecord() {
             break;
         }
 
-        result = avformat_write_header(m_pFormatCtx, nullptr);
+        result = WriteRecorderHeader(m_pFormatCtx);   // mp4 使用分段格式，见 RecorderMuxer.h
         if(result < 0) {
             LOGCATE("SingleVideoRecorder::StartRecord avformat_write_header ret=%s", av_err2str(result));
             break;

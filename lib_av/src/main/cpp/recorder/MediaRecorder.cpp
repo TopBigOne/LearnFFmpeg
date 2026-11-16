@@ -7,6 +7,7 @@
  * */
 
 #include "MediaRecorder.h"
+#include "RecorderMuxer.h"
 
 // 编码线程等待新数据的超时时间：超时只是为了定期检查退出标志，有数据或停止时会被立即唤醒
 #define QUEUE_WAIT_TIMEOUT_MS 50
@@ -88,7 +89,7 @@ int MediaRecorder::StartRecord() {
         }
 
         /* 写入文件头 */
-        int ret = avformat_write_header(m_FormatCtx, nullptr);
+        int ret = WriteRecorderHeader(m_FormatCtx);   // mp4 使用分段格式，见 RecorderMuxer.h
         if (ret < 0) {
             LOGCATE("MediaRecorder::StartRecord Error occurred when opening output file: %s", av_err2str(ret));
             break;
