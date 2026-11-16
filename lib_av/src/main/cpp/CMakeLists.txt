@@ -40,6 +40,7 @@ file(GLOB src-files
         ${CMAKE_SOURCE_DIR}/recorder/GLCameraRender.cpp
         ${CMAKE_SOURCE_DIR}/recorder/MediaRecorder.cpp
         ${CMAKE_SOURCE_DIR}/recorder/YuvConvert.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/HwVideoEncoder.cpp
         ${CMAKE_SOURCE_DIR}/thirdparty/sonic/sonic.c
         )
 

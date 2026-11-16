@@ -8,6 +8,7 @@
 
 #include <LogUtil.h>
 #include <ImageDef.h>
+#include <cstdio>
 #include "MediaRecorderContext.h"
 
 jfieldID MediaRecorderContext::s_ContextHandle = 0L;
@@ -200,8 +201,22 @@ MediaRecorderContext::StartRecord(int recorderType, const char *outUrl, int fram
 			param.audioSampleRate = DEFAULT_SAMPLE_RATE;
 			param.channelLayout   = AV_CH_LAYOUT_STEREO;
 			param.sampleFormat    = AV_SAMPLE_FMT_S16;
+			param.preferHardwareVideo = true;
 			auto recorder = std::make_shared<MediaRecorder>(outUrl, &param);
 			result = recorder->StartRecord();
+			// 硬件编码：把编码器的输入 Surface 绑到 GL 渲染上。绑定失败（例如 EGL config 不兼容）
+			// 就丢弃这个录制器（文件头尚未写，删掉空文件），改用软件编码重新开始
+			if(result == 0 && recorder->IsHardwareVideo()
+			   && !GLCameraRender::GetInstance()->AttachEncoder(recorder->GetVideoInputWindow(),
+			                                                    recorder->GetVideoWidth(), recorder->GetVideoHeight(),
+			                                                    recorder.get())) {
+				LOGCATE("MediaRecorderContext::StartRecord attach encoder surface fail, fall back to software encoding");
+				recorder->StopRecord();
+				remove(outUrl);
+				param.preferHardwareVideo = false;
+				recorder = std::make_shared<MediaRecorder>(outUrl, &param);
+				result = recorder->StartRecord();
+			}
 			if(result == 0) {
 				std::lock_guard<std::mutex> lock(m_mutex);
 				m_pAVRecorder = recorder;
@@ -241,7 +256,11 @@ int MediaRecorderContext::StopRecord() {
 
 	if(videoRecorder) videoRecorder->StopRecord();
 	if(audioRecorder) audioRecorder->StopRecord();
-	if(avRecorder) avRecorder->StopRecord();
+	if(avRecorder) {
+		// 先解绑：返回后 GL 线程不会再往编码器 Surface 上画，编码器才能安全地结束
+		if(avRecorder->IsHardwareVideo()) GLCameraRender::GetInstance()->DetachEncoder();
+		avRecorder->StopRecord();
+	}
 	// 离开作用域时，若回调线程已用完，录制器在这里析构
 	return 0;
 }
@@ -250,7 +269,8 @@ void MediaRecorderContext::UpdateReadbackState() {
 	bool needVideo;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		needVideo = m_pVideoRecorder != nullptr || m_pAVRecorder != nullptr;
+		// 硬件编码直接把画面画到编码器 Surface，不需要 glReadPixels 回读
+		needVideo = m_pVideoRecorder != nullptr || (m_pAVRecorder != nullptr && !m_pAVRecorder->IsHardwareVideo());
 	}
 	GLCameraRender::GetInstance()->SetReadbackEnabled(needVideo);
 }

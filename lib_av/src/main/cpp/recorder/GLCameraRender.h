@@ -11,6 +11,10 @@
 #include <thread>
 #include <ImageDef.h>
 #include "YuvConvert.h"
+#include "VideoEncoderSink.h"
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <android/native_window.h>
 #include "VideoRender.h"
 #include <GLES3/gl3.h>
 #include <detail/type_mat.hpp>
@@ -83,6 +87,20 @@ public:
      * @param captureTimeUs 采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
      */
     void RenderAndroid420Frame(const Android420Planes &planes, int64_t captureTimeUs);
+
+    /**
+     * @brief 绑定硬件编码器的输入 Surface：之后每个新画面除了显示，还会直接画到编码器上
+     *
+     * 在调用线程上同步创建 EGLSurface（使用当前 GL 上下文的 display 和 config），
+     * 失败时返回 false，调用方应回退到软件编码（回读 + x264）
+     * @param sink 为每帧分配 pts，返回负数表示该帧不录；在 DetachEncoder 之前必须保持有效
+     */
+    bool AttachEncoder(ANativeWindow *window, int width, int height, VideoEncoderSink *sink);
+
+    /**
+     * @brief 解绑编码器：返回后 GL 线程不会再往编码器 Surface 上画，可以安全地结束编码器
+     */
+    void DetachEncoder();
 
     /**
      * @brief 反初始化，释放资源
@@ -212,6 +230,12 @@ private:
      */
     void GetRenderFrameFromFBO(int width, int height, int64_t captureTimeUs);
 
+    /** 把目标 FBO 的画面画到编码器 Surface 并送出一帧（GL 线程，仅新画面） */
+    void RenderToEncoder(bool isNewFrame, int64_t captureTimeUs);
+
+    /** 调用方持有 m_EncoderMutex */
+    void DetachEncoderLocked();
+
     /**
      * @brief 创建或更新滤镜素材纹理
      * 用于LUT滤镜等需要额外纹理的效果
@@ -239,6 +263,19 @@ private:
 
     NativeImage m_RenderImage;                      // 渲染图像数据缓冲
     int64_t m_RenderImageTimeUs = 0;                // m_RenderImage 的采集时刻（受 m_Mutex 保护）
+
+    // ---- 硬件编码器输入 Surface（均受 m_EncoderMutex 保护）----
+    // GL 线程画编码帧的整个过程都持有这把锁，所以别的线程拿到锁时，编码器的 EGLSurface 一定不是 current，
+    // 可以直接在本线程创建/销毁（EGL 允许跨线程操作非 current 的 Surface）
+    std::mutex m_EncoderMutex;
+    EGLDisplay m_EglDisplay = EGL_NO_DISPLAY;       // GL 上下文所在的 display（OnSurfaceCreated 时记录）
+    EGLConfig m_EglConfig = nullptr;                // GL 上下文的 config，编码器 Surface 必须与之兼容
+    EGLSurface m_EncoderSurface = EGL_NO_SURFACE;
+    ANativeWindow *m_EncoderWindow = nullptr;
+    int m_EncoderWidth = 0;
+    int m_EncoderHeight = 0;
+    VideoEncoderSink *m_EncoderSink = nullptr;
+    bool m_EncoderErrorLogged = false;
     bool m_HasNewFrame = false;                     // 是否有尚未回读给录制模块的新画面（受 m_Mutex 保护）
     glm::mat4 m_MVPMatrix;                         // MVP变换矩阵（模型-视图-投影）
     TransformMatrix m_transformMatrix;              // 变换矩阵

@@ -8,9 +8,17 @@
 
 #include "MediaRecorder.h"
 #include "RecorderMuxer.h"
+#include <sys/system_properties.h>
 
 // 编码线程等待新数据的超时时间：超时只是为了定期检查退出标志，有数据或停止时会被立即唤醒
 #define QUEUE_WAIT_TIMEOUT_MS 50
+
+// 写文件头之前最多缓存的包数（音频约 43 包/秒，足够覆盖硬件编码器出第一帧的时间）
+#define MAX_PENDING_PACKETS 1000
+
+// 硬件编码视频流的时间基：90kHz 是视频的常用时间基，1 小时的时长也不会让 32 位的字段溢出
+static const AVRational kHwVideoTimeBase = {1, 90000};
+static const AVRational kMicrosecondTimeBase = {1, 1000000};
 
 // 单次纠偏的上限：超过它说明时间戳本身不可信（例如时基不一致），宁可不纠也不要塞进几分钟的静音
 #define MAX_AUDIO_CORRECTION_US 5000000
@@ -53,9 +61,13 @@ int MediaRecorder::StartRecord() {
 
         m_OutputFormat = m_FormatCtx->oformat;
 
-        /* 使用该格式的默认编码器添加音频和视频流，每一步都检查返回值 */
+        /* 添加音频和视频流，每一步都检查返回值。视频优先硬件编码，不可用时回退到格式默认的软件编码器 */
         if (m_OutputFormat->video_codec != AV_CODEC_ID_NONE) {
-            if (AddStream(&m_VideoStream, &m_VideoCodec, m_OutputFormat->video_codec) < 0) break;
+            if (m_RecorderParam.preferHardwareVideo && OpenHardwareVideo()) {
+                m_HwVideo = true;
+            } else if (AddStream(&m_VideoStream, &m_VideoCodec, m_OutputFormat->video_codec) < 0) {
+                break;
+            }
             m_EnableVideo = true;
         }
         if (m_OutputFormat->audio_codec != AV_CODEC_ID_NONE) {
@@ -64,7 +76,7 @@ int MediaRecorder::StartRecord() {
         }
 
         /* 打开编码器并分配编码缓冲区 */
-        if (m_EnableVideo && OpenVideo(m_VideoCodec, &m_VideoStream) < 0) break;
+        if (m_EnableVideo && !m_HwVideo && OpenVideo(m_VideoCodec, &m_VideoStream) < 0) break;
         if (m_EnableAudio && OpenAudio(m_AudioCodec, &m_AudioStream) < 0) break;
 
         av_dump_format(m_FormatCtx, 0, m_OutUrl, 1);
@@ -78,13 +90,15 @@ int MediaRecorder::StartRecord() {
             }
         }
 
-        /* 写入文件头 */
-        int ret = WriteRecorderHeader(m_FormatCtx);   // mp4 使用分段格式，见 RecorderMuxer.h
-        if (ret < 0) {
-            LOGCATE("MediaRecorder::StartRecord Error occurred when opening output file: %s", av_err2str(ret));
-            break;
+        /* 写入文件头。硬件编码要等编码器给出 SPS/PPS（OnVideoConfig）才能写 */
+        if (!m_HwVideo) {
+            int ret = WriteRecorderHeader(m_FormatCtx);   // mp4 使用分段格式，见 RecorderMuxer.h
+            if (ret < 0) {
+                LOGCATE("MediaRecorder::StartRecord Error occurred when opening output file: %s", av_err2str(ret));
+                break;
+            }
+            m_HeaderWritten = true;
         }
-        m_HeaderWritten = true;
         result = 0;
     } while (false);
 
@@ -97,9 +111,15 @@ int MediaRecorder::StartRecord() {
     // 两路时间戳的 0 点。必须在 m_Started 置位前确定：生产线程看到 m_Started 后就会读它
     m_StartTimeUs = GetBootTimeUs();
     m_Started = true;
-    // 音频、视频各一个编码线程，彼此不再互相等待
+    // 音频、视频各一个编码线程，彼此不再互相等待；硬件编码时视频由编码器的输出线程负责
     if (m_EnableAudio) m_pAudioThread = new thread(AudioEncodeThread, this);
-    if (m_EnableVideo) m_pVideoThread = new thread(VideoEncodeThread, this);
+    if (m_HwVideo) {
+        m_HwEncoder->Start(this);
+    } else if (m_EnableVideo) {
+        m_pVideoThread = new thread(VideoEncodeThread, this);
+    }
+    LOGCATE("MediaRecorder::StartRecord video encoder: %s",
+            m_HwVideo ? ("MediaCodec " + m_HwEncoder->GetName()).c_str() : "x264 (software)");
     return 0;
 }
 
@@ -132,7 +152,8 @@ int MediaRecorder::OnFrame2Encode(AudioFrame *inputFrame, int64_t captureTimeUs)
  * @brief 将视频帧添加到编码队列（GL 线程调用）
  */
 int MediaRecorder::OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs) {
-    if (!m_Started || m_Exit || !m_EnableVideo) return 0;
+    // 硬件编码时画面直接画到编码器 Surface，不走回读
+    if (!m_Started || m_Exit || !m_EnableVideo || m_HwVideo) return 0;
     LOGCATV("MediaRecorder::OnFrame2Encode [w,h,format]=[%d,%d,%d]", inputFrame->width, inputFrame->height, inputFrame->format);
     if (captureTimeUs == CAPTURE_TIME_UNKNOWN) captureTimeUs = GetBootTimeUs();
     // 点击开始之前就已采集的画面不属于本次录制（拷贝之前判断，省掉一次整帧拷贝）
@@ -206,6 +227,12 @@ int MediaRecorder::StopRecord() {
         m_pVideoThread = nullptr;
     }
 
+    // 硬件编码：通知输入结束并取完剩余码流（GL 侧已解绑，不会再有新帧）
+    if (m_HwEncoder) m_HwEncoder->Stop();
+
+    if (m_Started && !m_HeaderWritten) {
+        LOGCATE("MediaRecorder::StopRecord no video config received, file header never written");
+    }
     if (m_Started && m_HeaderWritten) {
         // 写入文件尾部信息（mp4 的 moov 索引在这里写入，没有它文件无法播放）
         int ret = av_write_trailer(m_FormatCtx);
@@ -218,6 +245,15 @@ int MediaRecorder::StopRecord() {
 }
 
 void MediaRecorder::Release() {
+    if (m_HwEncoder) {
+        m_HwEncoder->Stop();
+        m_HwEncoder.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_WriteMutex);
+        for (PendingPacket &p : m_PendingPackets) av_packet_free(&p.pkt);
+        m_PendingPackets.clear();
+    }
     // 清理队列中剩余的帧
     while (VideoFrame *pFrame = m_VideoFrameQueue.Pop()) {
         NativeImageUtil::FreeNativeImage(pFrame);
@@ -401,16 +437,132 @@ void MediaRecorder::VideoEncodeThread(MediaRecorder *recorder) {
 
 /**
  * @brief 将编码数据包写入到媒体文件（两路编码线程共用，加锁串行）
+ *
+ * 文件头还没写时（硬件编码在等 SPS/PPS）先缓存，写头后由 OnVideoConfig 按顺序写出
  */
 int MediaRecorder::WritePacket(AVRational *time_base, AVStream *st, AVPacket *pkt) {
-    /* 将时间戳从编码器时间基换算到流时间基 */
-    av_packet_rescale_ts(pkt, *time_base, st->time_base);
-    pkt->stream_index = st->index;
+    std::lock_guard<std::mutex> lock(m_WriteMutex);
+    if (!m_HeaderWritten) {
+        if (m_HeaderFailed || m_PendingPackets.size() >= MAX_PENDING_PACKETS) {
+            LOGCATV("MediaRecorder::WritePacket header not written, drop packet");
+            return 0;
+        }
+        AVPacket *clone = av_packet_clone(pkt);
+        if (clone == nullptr) return AVERROR(ENOMEM);
+        m_PendingPackets.push_back({clone, *time_base, st});
+        return 0;
+    }
+    return WritePacketLocked(*time_base, st, pkt);
+}
 
+int MediaRecorder::WritePacketLocked(AVRational time_base, AVStream *st, AVPacket *pkt) {
+    /* 将时间戳从编码器时间基换算到流时间基（写头时 muxer 可能改了流的时间基，所以在写入时才换算） */
+    av_packet_rescale_ts(pkt, time_base, st->time_base);
+    pkt->stream_index = st->index;
     LOGCATV("MediaRecorder::WritePacket stream=%d pts=%s pts_time=%s", st->index,
             av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base));
-    std::lock_guard<std::mutex> lock(m_WriteMutex);
     return av_interleaved_write_frame(m_FormatCtx, pkt);
+}
+
+bool MediaRecorder::OpenHardwareVideo() {
+    // 调试开关：adb shell setprop debug.learnffmpeg.sw_encode 1 强制走软件编码，用于验证回退路径
+    char prop[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.learnffmpeg.sw_encode", prop) > 0 && strcmp(prop, "1") == 0) {
+        LOGCATE("MediaRecorder::OpenHardwareVideo disabled by debug.learnffmpeg.sw_encode");
+        return false;
+    }
+
+    std::unique_ptr<HwVideoEncoder> encoder(new HwVideoEncoder());
+    if (!encoder->Open(m_RecorderParam.frameWidth, m_RecorderParam.frameHeight,
+                       static_cast<int>(m_RecorderParam.videoBitRate), m_RecorderParam.fps)) {
+        return false;
+    }
+
+    AVStream *st = avformat_new_stream(m_FormatCtx, nullptr);
+    if (st == nullptr) {
+        LOGCATE("MediaRecorder::OpenHardwareVideo Could not allocate stream");
+        return false;
+    }
+    st->id = m_FormatCtx->nb_streams - 1;
+    // 编码器在 MediaCodec 里，这里只描述码流参数；SPS/PPS（extradata）等编码器输出后再填
+    st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    st->codecpar->codec_id = AV_CODEC_ID_H264;
+    st->codecpar->width = m_RecorderParam.frameWidth;
+    st->codecpar->height = m_RecorderParam.frameHeight;
+    st->codecpar->format = AV_PIX_FMT_YUV420P;
+    st->codecpar->bit_rate = m_RecorderParam.videoBitRate;
+    st->time_base = kHwVideoTimeBase;
+    st->avg_frame_rate = AVRational{m_RecorderParam.fps, 1};
+    m_VideoStream.m_pStream = st;
+    m_HwEncoder = std::move(encoder);
+    return true;
+}
+
+ANativeWindow *MediaRecorder::GetVideoInputWindow() const {
+    return m_HwEncoder ? m_HwEncoder->GetInputWindow() : nullptr;
+}
+
+int64_t MediaRecorder::NextVideoPtsUs(int64_t captureTimeUs) {
+    if (!m_Started || m_Exit || !m_HwVideo) return -1;
+    if (captureTimeUs == CAPTURE_TIME_UNKNOWN) captureTimeUs = GetBootTimeUs();
+    // 与软件编码相同的规则：起点前采集的帧不录，第一帧固定为 0，之后严格递增
+    if (captureTimeUs < m_StartTimeUs) return -1;
+    int64_t pts = captureTimeUs - m_StartTimeUs;
+    int64_t last = m_HwLastPtsUs.load();
+    if (last < 0) pts = 0;
+    else if (pts <= last) pts = last + 1000;
+    m_HwLastPtsUs = pts;
+    return pts;
+}
+
+void MediaRecorder::OnVideoConfig(const uint8_t *data, size_t size) {
+    std::lock_guard<std::mutex> lock(m_WriteMutex);
+    if (m_HeaderWritten || m_HeaderFailed) return;
+    AVCodecParameters *par = m_VideoStream.m_pStream->codecpar;
+    // SPS/PPS 是 Annex B 格式（00 00 00 01 起始码），mp4 muxer 会转成 avcC，并把每帧码流转成长度前缀格式
+    par->extradata = static_cast<uint8_t *>(av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE));
+    if (par->extradata == nullptr) {
+        m_HeaderFailed = true;
+        return;
+    }
+    memcpy(par->extradata, data, size);
+    par->extradata_size = static_cast<int>(size);
+
+    int ret = WriteRecorderHeader(m_FormatCtx);
+    if (ret < 0) {
+        LOGCATE("MediaRecorder::OnVideoConfig write header fail: %s", av_err2str(ret));
+        m_HeaderFailed = true;
+    } else {
+        m_HeaderWritten = true;
+        LOGCATE("MediaRecorder::OnVideoConfig header written, flush %zu pending packets", m_PendingPackets.size());
+    }
+    for (PendingPacket &p : m_PendingPackets) {
+        if (m_HeaderWritten) WritePacketLocked(p.timeBase, p.stream, p.pkt);
+        av_packet_free(&p.pkt);
+    }
+    m_PendingPackets.clear();
+}
+
+void MediaRecorder::OnVideoPacket(const uint8_t *data, size_t size, int64_t ptsUs, bool keyFrame) {
+    AVPacket *pkt = av_packet_alloc();
+    if (pkt == nullptr || av_new_packet(pkt, static_cast<int>(size)) < 0) {
+        av_packet_free(&pkt);
+        return;
+    }
+    memcpy(pkt->data, data, size);
+    // 已关闭 B 帧，dts == pts；仍保证 dts 严格递增，防止个别编码器输出的时间戳重复
+    int64_t dts = ptsUs;
+    if (dts <= m_HwLastDtsUs) dts = m_HwLastDtsUs + 1;
+    m_HwLastDtsUs = dts;
+    pkt->pts = ptsUs < dts ? dts : ptsUs;
+    pkt->dts = dts;
+    if (keyFrame) pkt->flags |= AV_PKT_FLAG_KEY;
+    AVRational tb = kMicrosecondTimeBase;
+    int ret = WritePacket(&tb, m_VideoStream.m_pStream, pkt);
+    if (ret < 0) {
+        LOGCATE("MediaRecorder::OnVideoPacket write fail: %s", av_err2str(ret));
+    }
+    av_packet_free(&pkt);
 }
 
 int MediaRecorder::EncodeAndWrite(AVOutputStream *ost, AVFrame *frame) {

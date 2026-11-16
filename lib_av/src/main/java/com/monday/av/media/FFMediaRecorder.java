@@ -13,7 +13,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 
+import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.opengles.GL10;
 
 public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceView.Renderer {
@@ -26,6 +28,9 @@ public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceVi
     public void init(GLSurfaceView surfaceView) { //for Video
         mGLSurfaceView = surfaceView;
         mGLSurfaceView.setEGLContextClientVersion(2);
+        // 必须在 setRenderer 之前：选择可供 MediaCodec 输入 Surface 使用的 EGL config（硬件编码时
+        // 编码器 Surface 与 GL 上下文共用这个 config）
+        mGLSurfaceView.setEGLConfigChooser(new RecordableConfigChooser());
         mGLSurfaceView.setRenderer(this);
         mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
 
@@ -160,5 +165,39 @@ public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceVi
     public void unInit() {
         native_UnInit();
         native_DestroyContext();
+    }
+
+    /**
+     * 选择带 EGL_RECORDABLE_ANDROID 的 RGB888 config：硬件编码时 GL 线程把画面直接画到 MediaCodec 的输入 Surface，
+     * 部分设备要求该属性，否则编码器读不到画面或颜色错误。设备没有这样的 config 时退回普通 config
+     * （此时绑定编码器 Surface 若失败，Native 层会回退到软件编码）。
+     */
+    private static class RecordableConfigChooser implements GLSurfaceView.EGLConfigChooser {
+        private static final int EGL_RECORDABLE_ANDROID = 0x3142;
+        private static final int EGL_OPENGL_ES2_BIT = 4;
+
+        @Override
+        public EGLConfig chooseConfig(EGL10 egl, EGLDisplay display) {
+            EGLConfig config = choose(egl, display, true);
+            if (config == null) {
+                Log.w(TAG, "no recordable EGL config, use a normal one");
+                config = choose(egl, display, false);
+            }
+            if (config == null) throw new IllegalArgumentException("No EGL config available");
+            return config;
+        }
+
+        private static EGLConfig choose(EGL10 egl, EGLDisplay display, boolean recordable) {
+            int[] attribs = recordable
+                    ? new int[]{EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 16, EGL10.EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                    EGL_RECORDABLE_ANDROID, 1, EGL10.EGL_NONE}
+                    : new int[]{EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 16, EGL10.EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL10.EGL_NONE};
+            EGLConfig[] configs = new EGLConfig[1];
+            int[] count = new int[1];
+            if (!egl.eglChooseConfig(display, attribs, configs, 1, count) || count[0] < 1) return null;
+            return configs[0];
+        }
     }
 }

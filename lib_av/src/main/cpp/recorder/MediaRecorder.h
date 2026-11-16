@@ -21,6 +21,10 @@
 #include "RecorderClock.h"
 #include "AudioChunk.h"
 #include "YuvConvert.h"
+#include "HwVideoEncoder.h"
+#include "VideoEncoderSink.h"
+#include <deque>
+#include <memory>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -91,10 +95,19 @@ struct RecorderParam {
     int audioSampleRate;                   // 音频采样率（Hz）
     int channelLayout;                     // 声道布局（单声道/立体声等）
     int sampleFormat;                      // 采样格式（如AV_SAMPLE_FMT_S16）
+
+    // 视频编码方式：true 时优先使用 MediaCodec 硬件编码（Surface 输入），不可用时自动回退到 x264
+    bool preferHardwareVideo;
 };
 
 /**
  * @brief 音视频录制器
+ *
+ * 视频编码两种方式（StartRecord 时决定，IsHardwareVideo() 可查询）：
+ *  - 硬件编码：MediaCodec + 输入 Surface。GL 线程把画面直接画到编码器 Surface（见 GLCameraRender::AttachEncoder），
+ *    不回读、不转 YUV；编码器输出线程把码流交给封装。MP4 头需要 SPS/PPS，要等编码器第一次输出才写，
+ *    写头之前到达的音频包先缓存，写头后再按顺序写入；
+ *  - 软件编码（回退）：GL 线程回读 RGBA 入队，视频编码线程用 libyuv 转 YUV420P 后交给 x264。
  *
  * 线程模型：
  *  - 生产者：GL 线程（视频帧）、AudioRecord 线程（音频数据），只负责入队；
@@ -110,7 +123,7 @@ struct RecorderParam {
  *      2. 队列丢块：按丢失的采样数原位补静音，后续音频不会整体提前；
  *      3. 时钟漂移：按窗口统计偏差，超过阈值补静音或丢采样，以系统时钟为准把音频拉回。
  */
-class MediaRecorder {
+class MediaRecorder : public VideoEncoderSink, private HwVideoEncoder::Callback {
 public:
     MediaRecorder(const char *url, RecorderParam *param);
 
@@ -129,8 +142,24 @@ public:
      */
     int OnFrame2Encode(NativeImage *inputFrame, int64_t captureTimeUs);
 
-    /** 停止录制：把队列里剩余的数据编码完、刷新编码器、写文件尾。可重复调用 */
+    /**
+     * 停止录制：把队列里剩余的数据编码完、刷新编码器、写文件尾。可重复调用。
+     * 硬件编码时，调用前必须先让 GL 侧解绑编码器 Surface（GLCameraRender::DetachEncoder）
+     */
     int StopRecord();
+
+    /** 视频是否使用硬件编码（StartRecord 成功后有效） */
+    bool IsHardwareVideo() const { return m_HwVideo; }
+
+    /** 硬件编码时编码器的输入 Surface，交给 GLCameraRender::AttachEncoder；软件编码时为 nullptr */
+    ANativeWindow *GetVideoInputWindow() const;
+
+    int GetVideoWidth() const { return m_RecorderParam.frameWidth; }
+
+    int GetVideoHeight() const { return m_RecorderParam.frameHeight; }
+
+    /** VideoEncoderSink：硬件编码时 GL 线程为每帧取 pts */
+    int64_t NextVideoPtsUs(int64_t captureTimeUs) override;
 
 private:
     static void AudioEncodeThread(MediaRecorder *recorder);
@@ -181,6 +210,18 @@ private:
     /** 释放所有资源，可重复调用 */
     void Release();
 
+    /** 尝试打开硬件编码器并创建对应的视频流，失败返回 false（已清理，调用方走软件编码） */
+    bool OpenHardwareVideo();
+
+    /** HwVideoEncoder::Callback：SPS/PPS 到达，写文件头并把缓存的包写出 */
+    void OnVideoConfig(const uint8_t *data, size_t size) override;
+
+    /** HwVideoEncoder::Callback：一帧 H.264 码流 */
+    void OnVideoPacket(const uint8_t *data, size_t size, int64_t ptsUs, bool keyFrame) override;
+
+    /** 写一个包到文件（调用方持有 m_WriteMutex，且文件头已写） */
+    int WritePacketLocked(AVRational time_base, AVStream *st, AVPacket *pkt);
+
 private:
     RecorderParam    m_RecorderParam = {0};        // 录制参数配置
     AVOutputStream   m_VideoStream;                // 视频输出流对象
@@ -200,6 +241,21 @@ private:
     std::vector<VideoFrame *> m_FramePool;         // 视频帧缓冲复用池，避免每帧 malloc 一大块内存
 
     std::mutex       m_WriteMutex;                 // 两路编码线程写同一个文件，需要串行
+
+    // ---- 硬件编码 ----
+    bool             m_HwVideo = false;            // 视频是否走硬件编码
+    std::unique_ptr<HwVideoEncoder> m_HwEncoder;
+    std::atomic<int64_t> m_HwLastPtsUs{-1};        // GL 线程：上一帧 pts（微秒），保证严格递增
+    int64_t          m_HwLastDtsUs = -1;           // 输出线程：上一包 dts，保证严格递增
+    bool             m_HeaderFailed = false;       // 写文件头失败（受 m_WriteMutex 保护）
+
+    /** 写文件头之前到达的包（受 m_WriteMutex 保护），写头后按顺序写出 */
+    struct PendingPacket {
+        AVPacket *pkt;
+        AVRational timeBase;
+        AVStream *stream;
+    };
+    std::deque<PendingPacket> m_PendingPackets;
 
     bool             m_EnableVideo = false;
     bool             m_EnableAudio = false;

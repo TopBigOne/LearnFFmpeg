@@ -117,6 +117,7 @@ GLCameraRender::GLCameraRender():VideoRender(VIDEO_RENDER_OPENGL) {
  * 释放渲染图像资源
  */
 GLCameraRender::~GLCameraRender() {
+    DetachEncoder();
     NativeImageUtil::FreeNativeImage(&m_RenderImage);
 
 }
@@ -205,6 +206,7 @@ void GLCameraRender::RenderAndroid420Frame(const Android420Planes &planes, int64
  * 释放扩展图像和着色器缓冲区资源
  */
 void GLCameraRender::UnInit() {
+    DetachEncoder();
     {
         // 图像数据会被 GL 线程读取，在锁内释放（原来不加锁）
         std::lock_guard<std::mutex> lock(m_Mutex);
@@ -361,6 +363,26 @@ void GLCameraRender::OnSurfaceCreated() {
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_ExtImageChanged = m_ExtImage.ppPlane[0] != nullptr;   // LUT 纹理需要重新上传
+    }
+    {
+        // 记录当前上下文的 display 和 config：硬件编码器的输入 Surface 要用同一个 config 创建，
+        // 才能和这个上下文一起 make current。GLSurfaceView 已选择带 EGL_RECORDABLE_ANDROID 的 config
+        std::lock_guard<std::mutex> lock(m_EncoderMutex);
+        m_EglDisplay = eglGetCurrentDisplay();
+        m_EglConfig = nullptr;
+        EGLContext context = eglGetCurrentContext();
+        EGLint configId = 0;
+        if (m_EglDisplay != EGL_NO_DISPLAY && context != EGL_NO_CONTEXT
+            && eglQueryContext(m_EglDisplay, context, EGL_CONFIG_ID, &configId)) {
+            EGLint attribs[] = {EGL_CONFIG_ID, configId, EGL_NONE};
+            EGLint count = 0;
+            if (!eglChooseConfig(m_EglDisplay, attribs, &m_EglConfig, 1, &count) || count < 1) {
+                m_EglConfig = nullptr;
+            }
+        }
+        EGLint recordable = 0;
+        if (m_EglConfig != nullptr) eglGetConfigAttrib(m_EglDisplay, m_EglConfig, EGL_RECORDABLE_ANDROID, &recordable);
+        LOGCATE("GLCameraRender::OnSurfaceCreated EGL configId=%d recordable=%d", configId, recordable);
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);   // 色度平面行宽不一定是 4 的倍数
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -609,6 +631,9 @@ void GLCameraRender::OnDrawFrame() {
     if (isNewFrame) GetRenderFrameFromFBO(outWidth, outHeight, captureTimeUs);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // 硬件编码：把同一个画面直接画到编码器的输入 Surface（不回读、不转 YUV）
+    RenderToEncoder(isNewFrame, captureTimeUs);
+
     // 第三步：渲染到屏幕
     glViewport(0, 0, m_ScreenSize.x, m_ScreenSize.y);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -621,6 +646,93 @@ void GLCameraRender::OnDrawFrame() {
 
     GLUtils::setInt(m_ProgramObj, "u_nImgType", IMAGE_FORMAT_RGBA);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
+}
+
+bool GLCameraRender::AttachEncoder(ANativeWindow *window, int width, int height, VideoEncoderSink *sink) {
+    std::lock_guard<std::mutex> lock(m_EncoderMutex);
+    DetachEncoderLocked();
+    if (window == nullptr || sink == nullptr || width <= 0 || height <= 0) return false;
+    if (m_EglDisplay == EGL_NO_DISPLAY || m_EglConfig == nullptr) {
+        LOGCATE("GLCameraRender::AttachEncoder GL context not ready");
+        return false;
+    }
+    EGLint attribs[] = {EGL_NONE};
+    EGLSurface surface = eglCreateWindowSurface(m_EglDisplay, m_EglConfig, window, attribs);
+    if (surface == EGL_NO_SURFACE) {
+        LOGCATE("GLCameraRender::AttachEncoder eglCreateWindowSurface fail, error=0x%x", eglGetError());
+        return false;
+    }
+    ANativeWindow_acquire(window);
+    m_EncoderWindow = window;
+    m_EncoderSurface = surface;
+    m_EncoderWidth = width;
+    m_EncoderHeight = height;
+    m_EncoderSink = sink;
+    m_EncoderErrorLogged = false;
+    LOGCATE("GLCameraRender::AttachEncoder [w,h]=[%d,%d]", width, height);
+    return true;
+}
+
+void GLCameraRender::DetachEncoder() {
+    std::lock_guard<std::mutex> lock(m_EncoderMutex);
+    DetachEncoderLocked();
+}
+
+void GLCameraRender::DetachEncoderLocked() {
+    if (m_EncoderSurface != EGL_NO_SURFACE) {
+        eglDestroySurface(m_EglDisplay, m_EncoderSurface);
+        m_EncoderSurface = EGL_NO_SURFACE;
+    }
+    if (m_EncoderWindow != nullptr) {
+        ANativeWindow_release(m_EncoderWindow);
+        m_EncoderWindow = nullptr;
+    }
+    m_EncoderSink = nullptr;
+}
+
+void GLCameraRender::RenderToEncoder(bool isNewFrame, int64_t captureTimeUs) {
+    std::lock_guard<std::mutex> lock(m_EncoderMutex);
+    if (!isNewFrame || m_EncoderSurface == EGL_NO_SURFACE || m_EncoderSink == nullptr) return;
+    int64_t ptsUs = m_EncoderSink->NextVideoPtsUs(captureTimeUs);
+    if (ptsUs < 0) return;   // 录制开始前采集的画面
+
+    EGLDisplay display = eglGetCurrentDisplay();
+    EGLContext context = eglGetCurrentContext();
+    EGLSurface drawSurface = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface readSurface = eglGetCurrentSurface(EGL_READ);
+    if (display != m_EglDisplay || context == EGL_NO_CONTEXT) return;
+    if (!eglMakeCurrent(display, m_EncoderSurface, m_EncoderSurface, context)) {
+        if (!m_EncoderErrorLogged) {
+            m_EncoderErrorLogged = true;
+            LOGCATE("GLCameraRender::RenderToEncoder eglMakeCurrent fail, error=0x%x", eglGetError());
+        }
+        return;
+    }
+
+    // 与上屏（第三步）用同一个程序和纹理：编码画面与预览一致
+    glViewport(0, 0, m_EncoderWidth, m_EncoderHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(m_ProgramObj);
+    glBindVertexArray(m_VaoId);
+    GLUtils::setMat4(m_ProgramObj, "u_MVPMatrix", m_MVPMatrix);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_DstFboTextureId);
+    GLUtils::setInt(m_ProgramObj, "s_texture0", 0);
+    GLUtils::setInt(m_ProgramObj, "u_nImgType", IMAGE_FORMAT_RGBA);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
+
+    // 这一帧在码流里的时间戳：编码器输出的 presentationTimeUs 就是这里给的值
+    static PFNEGLPRESENTATIONTIMEANDROIDPROC presentationTime =
+            reinterpret_cast<PFNEGLPRESENTATIONTIMEANDROIDPROC>(eglGetProcAddress("eglPresentationTimeANDROID"));
+    if (presentationTime != nullptr) {
+        presentationTime(display, m_EncoderSurface, static_cast<EGLnsecsANDROID>(ptsUs) * 1000);
+    }
+    // 送出一帧。编码器来不及处理时这里会阻塞，GL 线程（预览）随之降速，由编码器自然限流
+    if (!eglSwapBuffers(display, m_EncoderSurface) && !m_EncoderErrorLogged) {
+        m_EncoderErrorLogged = true;
+        LOGCATE("GLCameraRender::RenderToEncoder eglSwapBuffers fail, error=0x%x", eglGetError());
+    }
+    eglMakeCurrent(display, drawSurface, readSurface, context);
 }
 
 /**
