@@ -19,11 +19,12 @@
 /**
  * H.264 硬件编码器，两种输入方式：
  *
- *  - Surface：createInputSurface 得到 ANativeWindow，由 GL 线程把画面直接画上去（eglSwapBuffers 即送一帧），
- *    不需要 glReadPixels 回读和 RGBA→YUV 转换，帧的 pts 由 eglPresentationTimeANDROID 指定。
- *    适合画面本来就在 GL 里的场景（相机录制）。需要 Android 8.0（API 26）。
- *  - Buffer：调用方用 EncodeImage 送入 CPU 内存里的图像，转换成编码器要求的 NV12 / I420 后写入输入缓冲。
- *    适合画面在 CPU 内存里的场景（边播边录的解码帧）。Android 5.0 起可用。
+ *  -1: Surface：createInputSurface 得到 ANativeWindow，由 GL 线程把画面直接画上去（eglSwapBuffers 即送一帧），
+ *      不需要 glReadPixels 回读和 RGBA→YUV 转换，帧的 pts 由 eglPresentationTimeANDROID 指定。
+ *      适合画面本来就在 GL 里的场景（相机录制）。需要 Android 8.0（API 26）。
+ *
+ *  -2: Buffer：调用方用 EncodeImage 送入 CPU 内存里的图像，转换成编码器要求的 NV12 / I420 后写入输入缓冲。
+ *      适合画面在 CPU 内存里的场景（边播边录的解码帧）。Android 5.0 起可用。
  *
  * 输出：后台线程从编码器取出码流（Annex B 格式），通过回调交给封装模块。
  * 工程 minSdk 是 23，API 26/28 才有的函数直接调用：CMake 打开 __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__，
@@ -46,7 +47,8 @@ public:
         virtual void OnVideoConfig(const uint8_t *data, size_t size) = 0;
 
         /** 一帧码流（Annex B），ptsUs 为送入时指定的时间（微秒） */
-        virtual void OnVideoPacket(const uint8_t *data, size_t size, int64_t ptsUs, bool keyFrame) = 0;
+        virtual void
+        OnVideoPacket(const uint8_t *data, size_t size, int64_t ptsUs, bool keyFrame) = 0;
     };
 
     HwVideoEncoder() = default;
@@ -54,6 +56,7 @@ public:
     ~HwVideoEncoder();
 
     HwVideoEncoder(const HwVideoEncoder &) = delete;
+
     HwVideoEncoder &operator=(const HwVideoEncoder &) = delete;
 
     /**

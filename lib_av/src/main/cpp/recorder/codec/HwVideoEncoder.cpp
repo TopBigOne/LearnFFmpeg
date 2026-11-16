@@ -13,22 +13,22 @@
 
 namespace {
 
-const char *kMimeAvc = "video/avc";
+    const char *kMimeAvc = "video/avc";
 // COLOR_FormatSurface indicates that the data will be a GraphicBuffer metadata reference.
 // Note: in OMX this is called OMX_COLOR_FormatAndroidOpaque.
 // 0x7F000789 只表示“输入走 Surface”
-const int32_t kColorFormatSurface = 0x7F000789;          // COLOR_FormatSurface
-const int32_t kColorFormatYUV420Planar = 19;             // COLOR_FormatYUV420Planar（I420）
-const int32_t kColorFormatYUV420SemiPlanar = 21;         // COLOR_FormatYUV420SemiPlanar（NV12）
-const uint32_t kBufferFlagKeyFrame = 1;                  // AMEDIACODEC_BUFFER_FLAG_KEY_FRAME（头文件标注 API 34，值从 API 21 起就是 1）
-const int64_t kDequeueTimeoutUs = 10000;
-const int64_t kInputTimeoutUs = 20000;                   // Buffer 模式等待空闲输入缓冲的时间
-const int64_t kEosWaitUs = 2000000;                      // 停止时最多等 2 秒拿到 EOS
+    const int32_t kColorFormatSurface = 0x7F000789;          // COLOR_FormatSurface
+    const int32_t kColorFormatYUV420Planar = 19;             // COLOR_FormatYUV420Planar（I420）
+    const int32_t kColorFormatYUV420SemiPlanar = 21;         // COLOR_FormatYUV420SemiPlanar（NV12）
+    const uint32_t kBufferFlagKeyFrame = 1;                  // AMEDIACODEC_BUFFER_FLAG_KEY_FRAME（头文件标注 API 34，值从 API 21 起就是 1）
+    const int64_t kDequeueTimeoutUs = 10000;
+    const int64_t kInputTimeoutUs = 20000;                   // Buffer 模式等待空闲输入缓冲的时间
+    const int64_t kEosWaitUs = 2000000;                      // 停止时最多等 2 秒拿到 EOS
 
 /** Google 自带的软件编码器，名字有固定前缀 */
-bool IsSoftwareCodec(const std::string &name) {
-    return name.rfind("OMX.google.", 0) == 0 || name.rfind("c2.android.", 0) == 0;
-}
+    bool IsSoftwareCodec(const std::string &name) {
+        return name.rfind("OMX.google.", 0) == 0 || name.rfind("c2.android.", 0) == 0;
+    }
 
 }
 
@@ -69,7 +69,8 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
     bool configured = false;
     for (int i = 0; i < formatCount && !configured; ++i) {
         configured = Configure(width, height, bitRate, fps, formats[i]);
-        if (!configured && m_Codec == nullptr && !m_Name.empty() && IsSoftwareCodec(m_Name)) return false;
+        if (!configured && m_Codec == nullptr && !m_Name.empty() && IsSoftwareCodec(m_Name))
+            return false;
     }
     if (!configured) return false;
 
@@ -101,8 +102,12 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
             AMediaFormat *inputFormat = AMediaCodec_getInputFormat(m_Codec);
             if (inputFormat != nullptr) {
                 int32_t stride = 0, sliceHeight = 0;
-                if (AMediaFormat_getInt32(inputFormat, "stride", &stride) && stride >= width) m_Stride = stride;
-                if (AMediaFormat_getInt32(inputFormat, "slice-height", &sliceHeight) && sliceHeight >= height) m_SliceHeight = sliceHeight;
+                if (AMediaFormat_getInt32(inputFormat, "stride", &stride) &&
+                    stride >= width)
+                    m_Stride = stride;
+                if (AMediaFormat_getInt32(inputFormat, "slice-height", &sliceHeight) &&
+                    sliceHeight >= height)
+                    m_SliceHeight = sliceHeight;
                 AMediaFormat_delete(inputFormat);
             }
         }
@@ -130,9 +135,11 @@ bool HwVideoEncoder::Configure(int width, int height, int bitRate, int fps, int3
         }
     }
     LOGCATE("HwVideoEncoder::Configure encoder=%s [w,h]=[%d,%d] bitRate=%d fps=%d colorFormat=0x%x",
-            m_Name.empty() ? "(unknown)" : m_Name.c_str(), width, height, bitRate, fps, colorFormat);
+            m_Name.empty() ? "(unknown)" : m_Name.c_str(), width, height, bitRate, fps,
+            colorFormat);
     if (IsSoftwareCodec(m_Name)) {
-        LOGCATE("HwVideoEncoder::Configure %s is a software encoder, fall back to x264", m_Name.c_str());
+        LOGCATE("HwVideoEncoder::Configure %s is a software encoder, fall back to x264",
+                m_Name.c_str());
         Release();
         return false;
     }
@@ -147,10 +154,12 @@ bool HwVideoEncoder::Configure(int width, int height, int bitRate, int fps, int3
     AMediaFormat_setInt32(format, "i-frame-interval", 1);   // 约 1 秒一个关键帧，与分段 MP4 的切段间隔一致
     // 不要 B 帧：MediaCodec 只输出 pts 不输出 dts，没有 B 帧时 dts == pts（不支持该键的系统会忽略）
     AMediaFormat_setInt32(format, "max-bframes", 0);
-    media_status_t status = AMediaCodec_configure(m_Codec, format, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    media_status_t status = AMediaCodec_configure(m_Codec, format, nullptr, nullptr,
+                                                  AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
     AMediaFormat_delete(format);
     if (status != AMEDIA_OK) {
-        LOGCATE("HwVideoEncoder::Configure configure fail status=%d colorFormat=0x%x", status, colorFormat);
+        LOGCATE("HwVideoEncoder::Configure configure fail status=%d colorFormat=0x%x", status,
+                colorFormat);
         Release();
         return false;
     }
@@ -177,9 +186,11 @@ bool HwVideoEncoder::EncodeImage(const NativeImage &image, int64_t ptsUs) {
     // 色度部分只写到最后一行有效数据：最后一个平面不要求补齐到 sliceHeight
     const size_t needed = m_ColorFormat == kColorFormatYUV420SemiPlanar
                           ? ySize + static_cast<size_t>(m_Stride) * ((m_Height + 1) / 2)
-                          : ySize + static_cast<size_t>(m_Stride / 2) * (m_SliceHeight / 2) + static_cast<size_t>(m_Stride / 2) * ((m_Height + 1) / 2);
+                          : ySize + static_cast<size_t>(m_Stride / 2) * (m_SliceHeight / 2) +
+                            static_cast<size_t>(m_Stride / 2) * ((m_Height + 1) / 2);
     if (buffer == nullptr || capacity < needed) {
-        LOGCATE("HwVideoEncoder::EncodeImage input buffer too small capacity=%zu needed=%zu", capacity, needed);
+        LOGCATE("HwVideoEncoder::EncodeImage input buffer too small capacity=%zu needed=%zu",
+                capacity, needed);
         AMediaCodec_queueInputBuffer(m_Codec, static_cast<size_t>(index), 0, 0, ptsUs, 0);
         return false;
     }
@@ -188,7 +199,8 @@ bool HwVideoEncoder::EncodeImage(const NativeImage &image, int64_t ptsUs) {
     if (m_ColorFormat == kColorFormatYUV420SemiPlanar) {
         // 先转成编码尺寸的 I420，再交错成 NV12 写入输入缓冲（libyuv 两步都很快）
         const int halfW = (m_Width + 1) / 2, halfH = (m_Height + 1) / 2;
-        const size_t i420Size = static_cast<size_t>(m_Width) * m_Height + static_cast<size_t>(halfW) * halfH * 2;
+        const size_t i420Size =
+                static_cast<size_t>(m_Width) * m_Height + static_cast<size_t>(halfW) * halfH * 2;
         if (m_I420.size() != i420Size) m_I420.resize(i420Size);
         uint8_t *y = m_I420.data();
         uint8_t *u = y + static_cast<size_t>(m_Width) * m_Height;
@@ -201,13 +213,15 @@ bool HwVideoEncoder::EncodeImage(const NativeImage &image, int64_t ptsUs) {
     } else {
         uint8_t *u = buffer + ySize;
         uint8_t *v = u + static_cast<size_t>(m_Stride / 2) * (m_SliceHeight / 2);
-        ret = m_Converter.ConvertToI420(image, buffer, m_Stride, u, m_Stride / 2, v, m_Stride / 2, m_Width, m_Height);
+        ret = m_Converter.ConvertToI420(image, buffer, m_Stride, u, m_Stride / 2, v, m_Stride / 2,
+                                        m_Width, m_Height);
     }
     if (ret != 0) {
         AMediaCodec_queueInputBuffer(m_Codec, static_cast<size_t>(index), 0, 0, ptsUs, 0);
         return false;
     }
-    media_status_t status = AMediaCodec_queueInputBuffer(m_Codec, static_cast<size_t>(index), 0, needed, ptsUs, 0);
+    media_status_t status = AMediaCodec_queueInputBuffer(m_Codec, static_cast<size_t>(index), 0,
+                                                         needed, ptsUs, 0);
     if (status != AMEDIA_OK) {
         LOGCATE("HwVideoEncoder::EncodeImage queueInputBuffer fail status=%d", status);
         return false;
@@ -222,7 +236,8 @@ void HwVideoEncoder::SignalEndOfStream() {
             status = AMediaCodec_signalEndOfInputStream(m_Codec);
         }
         if (status != AMEDIA_OK) {
-            LOGCATE("HwVideoEncoder::SignalEndOfStream signalEndOfInputStream fail status=%d", status);
+            LOGCATE("HwVideoEncoder::SignalEndOfStream signalEndOfInputStream fail status=%d",
+                    status);
         }
         return;
     }
@@ -270,7 +285,8 @@ void HwVideoEncoder::DrainLoop() {
         ssize_t index = AMediaCodec_dequeueOutputBuffer(m_Codec, &info, kDequeueTimeoutUs);
         if (index >= 0) {
             size_t capacity = 0;
-            uint8_t *buffer = AMediaCodec_getOutputBuffer(m_Codec, static_cast<size_t>(index), &capacity);
+            uint8_t *buffer = AMediaCodec_getOutputBuffer(m_Codec, static_cast<size_t>(index),
+                                                          &capacity);
             bool eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
             if (buffer != nullptr && info.size > 0
                 && static_cast<size_t>(info.offset) + static_cast<size_t>(info.size) <= capacity) {
@@ -294,13 +310,17 @@ void HwVideoEncoder::DrainLoop() {
         } else if (index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
             AMediaFormat *format = AMediaCodec_getOutputFormat(m_Codec);
             if (format != nullptr) {
-                LOGCATE("HwVideoEncoder::DrainLoop output format: %s", AMediaFormat_toString(format));
+                LOGCATE("HwVideoEncoder::DrainLoop output format: %s",
+                        AMediaFormat_toString(format));
                 void *sps = nullptr, *pps = nullptr;
                 size_t spsSize = 0, ppsSize = 0;
-                if (!m_ConfigSent && AMediaFormat_getBuffer(format, "csd-0", &sps, &spsSize) && spsSize > 0) {
-                    config.assign(static_cast<uint8_t *>(sps), static_cast<uint8_t *>(sps) + spsSize);
+                if (!m_ConfigSent && AMediaFormat_getBuffer(format, "csd-0", &sps, &spsSize) &&
+                    spsSize > 0) {
+                    config.assign(static_cast<uint8_t *>(sps),
+                                  static_cast<uint8_t *>(sps) + spsSize);
                     if (AMediaFormat_getBuffer(format, "csd-1", &pps, &ppsSize) && ppsSize > 0) {
-                        config.insert(config.end(), static_cast<uint8_t *>(pps), static_cast<uint8_t *>(pps) + ppsSize);
+                        config.insert(config.end(), static_cast<uint8_t *>(pps),
+                                      static_cast<uint8_t *>(pps) + ppsSize);
                     }
                     m_ConfigSent = true;
                     m_Callback->OnVideoConfig(config.data(), config.size());
