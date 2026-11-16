@@ -165,6 +165,8 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
 
     @Override
     protected void onPause() {
+        // 不限时长的录制不能在后台继续：相机已停、只剩音频，文件会一直变大。先正常结束录制
+        mRecordedButton.stopRecording();
         if (hasPermissionsGranted(REQUEST_PERMISSIONS)) {
             mCamera2Wrapper.stopCamera();
         }
@@ -256,7 +258,8 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
 
         mRecordedButton = findViewById(R.id.record_view);
         mRecordedButton.setButtonFeatures(BUTTON_STATE_ONLY_RECORDER);
-        mRecordedButton.setDuration(15 * 1000);
+        // 点一下开始、再点一下停止，不限时长
+        mRecordedButton.setTapToRecord(true);
         mRecordedButton.setIconSrc(0, 0);
         mRecordedButton.setCaptureLisenter(new CaptureListener() {
             @Override
@@ -276,6 +279,8 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
                 int fps = 25;
                 int bitRate = (int) (frameWidth * frameHeight * fps * 0.3);
                 mOutUrl = getOutFile(".mp4").getAbsolutePath();
+                // 录制期间保持亮屏：点按模式下长时间没有触摸，熄屏会触发 onPause 结束录制
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 mMediaRecorder.startRecord(RECORDER_TYPE_AV, mOutUrl, frameWidth, frameHeight, bitRate, fps);
                 mAudioRecorder = new AudioRecorder(AVRecorderActivity.this);
                 mAudioRecorder.start();
@@ -284,6 +289,7 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
 
             @Override
             public void recordEnd(long time) {
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 final ProgressDialog progressDialog = ProgressDialog.show(AVRecorderActivity.this, null, "[软编]等待队列中的数据编码完成", false, false);
                 mAudioRecorder.interrupt();
                 new Thread(new Runnable() {

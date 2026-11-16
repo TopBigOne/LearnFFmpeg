@@ -9,6 +9,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.CountDownTimer;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -60,6 +61,36 @@ public class CaptureButton extends View {
     private LongPressRunnable longPressRunnable;    //长按后处理的逻辑Runnable
     private CaptureListener captureLisenter;        //按钮回调接口
     private RecordCountDownTimer timer;             //计时器
+
+    // ---- 点按模式：点一下开始、再点一下停止，不限时长 ----
+    private static final int MIN_TAP_RECORD_MS = 1000;    // 开始后 1 秒内的点击不停止，防止双击误触录出空文件
+    private static final int TICK_INTERVAL_MS = 100;      // 刷新进度环、计时的间隔
+    private static final int RING_PERIOD_MS = 60 * 1000;  // 不限时长时进度环一分钟转一圈，像秒针
+    private boolean tapToRecord = false;
+    private boolean stopOnUp = false;           // 录制中按下了按钮，抬起时停止
+    private long recordStartUptime;             // 开始录制的时刻（uptimeMillis）
+    private int lastTickSecond = -1;
+    private RecordTickListener tickListener;
+    private final Runnable tickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (state != STATE_RECORDERING) return;
+            recorded_time = (int) (SystemClock.uptimeMillis() - recordStartUptime);
+            progress = (recorded_time % RING_PERIOD_MS) / (float) RING_PERIOD_MS * 360f;
+            invalidate();
+            int second = recorded_time / 1000;
+            if (second != lastTickSecond) {
+                lastTickSecond = second;
+                if (tickListener != null) tickListener.onRecordTick(recorded_time);
+            }
+            postDelayed(this, TICK_INTERVAL_MS);
+        }
+    };
+
+    /** 点按模式下录制计时回调（每秒一次） */
+    interface RecordTickListener {
+        void onRecordTick(long recordedMs);
+    }
 
     public CaptureButton(Context context) {
         super(context);
@@ -129,6 +160,10 @@ public class CaptureButton extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (tapToRecord) {
+            handleTapToRecord(event);
+            return true;
+        }
         switch (event.getAction()) {
             case MotionEvent.ACTION_DOWN:
                 if (event.getPointerCount() > 1 || state != STATE_IDLE)
@@ -154,6 +189,54 @@ public class CaptureButton extends View {
                 break;
         }
         return true;
+    }
+
+    /**
+     * 点按模式：空闲时点一下开始录制，录制中点一下停止。
+     * 以"按下并在按钮上抬起"作为一次点击，手指移出按钮再抬起不算。
+     */
+    private void handleTapToRecord(MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                if (event.getPointerCount() > 1) break;
+                if (state == STATE_IDLE) {
+                    state = STATE_PRESS;
+                } else if (state == STATE_RECORDERING) {
+                    stopOnUp = true;
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+                boolean inside = event.getX() >= 0 && event.getX() <= getWidth()
+                        && event.getY() >= 0 && event.getY() <= getHeight();
+                if (state == STATE_PRESS) {
+                    if (inside) {
+                        // 和长按一样：外圆变大、内圆缩小，动画结束后回调 recordStart 并进入录制状态
+                        state = STATE_LONG_PRESS;
+                        startRecordAnimation(
+                                button_outside_radius,
+                                button_outside_radius + outside_add_size,
+                                button_inside_radius,
+                                button_inside_radius - inside_reduce_size);
+                    } else {
+                        state = STATE_IDLE;
+                    }
+                } else if (state == STATE_RECORDERING && stopOnUp && inside
+                        && SystemClock.uptimeMillis() - recordStartUptime >= MIN_TAP_RECORD_MS) {
+                    stopTapRecord();
+                }
+                stopOnUp = false;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                if (state == STATE_PRESS) state = STATE_IDLE;
+                stopOnUp = false;
+                break;
+        }
+    }
+
+    private void stopTapRecord() {
+        removeCallbacks(tickRunnable);
+        recorded_time = (int) (SystemClock.uptimeMillis() - recordStartUptime);
+        recordEnd();
     }
 
     //当手指松开按钮时候处理的逻辑
@@ -264,7 +347,15 @@ public class CaptureButton extends View {
                     if (captureLisenter != null)
                         captureLisenter.recordStart();
                     state = STATE_RECORDERING;
-                    timer.start();
+                    if (tapToRecord) {
+                        // 不限时长：不用倒计时，改为正向计时
+                        recordStartUptime = SystemClock.uptimeMillis();
+                        recorded_time = 0;
+                        lastTickSecond = -1;
+                        post(tickRunnable);
+                    } else {
+                        timer.start();
+                    }
                 }
             }
         });
@@ -330,6 +421,44 @@ public class CaptureButton extends View {
     public void setDuration(int duration) {
         this.duration = duration;
         timer = new RecordCountDownTimer(duration, duration / 360);    //录制定时器
+    }
+
+    /**
+     * 点按模式：点一下开始、再点一下停止，不限时长（setDuration 不再生效）。
+     * 默认关闭，即"轻触拍照、长按录像、松手停止"。
+     */
+    public void setTapToRecord(boolean enabled) {
+        this.tapToRecord = enabled;
+    }
+
+    void setRecordTickListener(RecordTickListener listener) {
+        this.tickListener = listener;
+    }
+
+    /**
+     * 如果正在录制则立即结束（走正常的 recordEnd 回调）。
+     * 页面退到后台时调用，避免不限时长的录制在后台一直进行。
+     */
+    public void stopRecording() {
+        removeCallbacks(longPressRunnable);
+        if (state == STATE_RECORDERING) {
+            if (tapToRecord) {
+                stopTapRecord();
+            } else {
+                timer.cancel();
+                recordEnd();
+            }
+        } else if (state == STATE_PRESS || state == STATE_LONG_PRESS) {
+            // 还没真正开始（开始动画进行中）：取消，动画结束后不会再进入录制
+            state = STATE_IDLE;
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        removeCallbacks(tickRunnable);
+        removeCallbacks(longPressRunnable);
     }
 
     //设置最短录制时间

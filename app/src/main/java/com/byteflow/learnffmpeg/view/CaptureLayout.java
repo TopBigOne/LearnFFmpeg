@@ -50,6 +50,9 @@ public class CaptureLayout extends FrameLayout {
     private int iconRight = 0;
 
     private boolean isFirst = true;
+    private boolean tapToRecord = false;
+
+    private static final String TIP_TAP_TO_RECORD = "轻触开始录制，再次轻触停止";
 
     public CaptureLayout(Context context) {
         this(context, null);
@@ -150,7 +153,11 @@ public class CaptureLayout extends FrameLayout {
                 if (captureLisenter != null) {
                     captureLisenter.recordStart();
                 }
-                startAlphaAnimation();
+                if (tapToRecord) {
+                    txt_tip.setText(formatRecordTime(0));
+                } else {
+                    startAlphaAnimation();
+                }
             }
 
             @Override
@@ -158,7 +165,11 @@ public class CaptureLayout extends FrameLayout {
                 if (captureLisenter != null) {
                     captureLisenter.recordEnd(time);
                 }
-                startAlphaAnimation();
+                if (tapToRecord) {
+                    txt_tip.setText(TIP_TAP_TO_RECORD);
+                } else {
+                    startAlphaAnimation();
+                }
                 startTypeBtnAnimator();
             }
 
@@ -309,6 +320,39 @@ public class CaptureLayout extends FrameLayout {
 
     public void setDuration(int duration) {
         btn_capture.setDuration(duration);
+    }
+
+    /**
+     * 点按模式：点一下开始、再点一下停止，不限时长；录制中提示文字显示已录时长。
+     */
+    public void setTapToRecord(boolean enabled) {
+        tapToRecord = enabled;
+        btn_capture.setTapToRecord(enabled);
+        if (enabled) {
+            isFirst = false;    // 提示文字常驻（录制中用来显示计时），不再淡出
+            txt_tip.setAlpha(1f);
+            txt_tip.setText(TIP_TAP_TO_RECORD);
+            btn_capture.setRecordTickListener(new CaptureButton.RecordTickListener() {
+                @Override
+                public void onRecordTick(long recordedMs) {
+                    txt_tip.setText(formatRecordTime(recordedMs));
+                }
+            });
+        } else {
+            btn_capture.setRecordTickListener(null);
+        }
+    }
+
+    /** 正在录制则立即结束（页面退到后台时调用） */
+    public void stopRecording() {
+        btn_capture.stopRecording();
+    }
+
+    private static String formatRecordTime(long ms) {
+        long total = ms / 1000;
+        long h = total / 3600, m = total / 60 % 60, s = total % 60;
+        return h > 0 ? String.format(java.util.Locale.US, "● %d:%02d:%02d", h, m, s)
+                     : String.format(java.util.Locale.US, "● %02d:%02d", m, s);
     }
 
     public void setButtonFeatures(int state) {
