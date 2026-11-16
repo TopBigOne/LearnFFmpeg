@@ -11,6 +11,7 @@ include_directories(
         glm
         common
         ${CMAKE_SOURCE_DIR}/thirdparty/sonic
+        ${CMAKE_SOURCE_DIR}/thirdparty/libyuv/include
         ${CMAKE_SOURCE_DIR}/recorder
         ${CMAKE_SOURCE_DIR}/util
         ${CMAKE_SOURCE_DIR}/player
@@ -38,11 +39,18 @@ file(GLOB src-files
         ${CMAKE_SOURCE_DIR}/recorder/MediaRecorderContext.cpp
         ${CMAKE_SOURCE_DIR}/recorder/GLCameraRender.cpp
         ${CMAKE_SOURCE_DIR}/recorder/MediaRecorder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/YuvConvert.cpp
         ${CMAKE_SOURCE_DIR}/thirdparty/sonic/sonic.c
         )
 
 # Oboe 以源码编译成静态库（说明见 thirdparty/README.md），头文件通过 target 的 PUBLIC include 传递
 add_subdirectory(${CMAKE_SOURCE_DIR}/thirdparty/oboe ${CMAKE_CURRENT_BINARY_DIR}/oboe)
+
+# libyuv 用官方 CMakeLists 编译（说明见 thirdparty/README.md）：它按 ABI 给 NEON / SVE / SME 代码加上
+# 对应的编译参数，运行时再按 CPU 能力选择实现。EXCLUDE_FROM_ALL：只编译被链接的静态库 yuv，
+# 不编译它自带的命令行工具。不需要 JPEG 解码
+set(LIBYUV_DISABLE_JPEG ON CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/thirdparty/libyuv ${CMAKE_CURRENT_BINARY_DIR}/libyuv EXCLUDE_FROM_ALL)
 
 add_library( # Sets the name of the library.
              ${libname}
@@ -102,6 +110,7 @@ add_library( # Sets the name of the library.
 
 set(third-party-libs
         oboe
+        yuv
         avformat
         avcodec
         avfilter

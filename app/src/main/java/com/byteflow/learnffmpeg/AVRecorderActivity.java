@@ -22,6 +22,7 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.net.Uri;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
+import android.media.Image;
 import android.os.Bundle;
 import android.os.Environment;
 import android.util.DisplayMetrics;
@@ -72,7 +73,6 @@ import java.util.GregorianCalendar;
 import java.util.List;
 import java.util.Locale;
 
-import static com.monday.av.media.MediaRecorderContext.IMAGE_FORMAT_I420;
 import static com.monday.av.media.MediaRecorderContext.IMAGE_FORMAT_RGBA;
 import static com.monday.av.media.MediaRecorderContext.RECORDER_TYPE_AV;
 import static com.monday.av.media.MediaRecorderContext.RECORDER_TYPE_SINGLE_VIDEO;
@@ -215,9 +215,9 @@ public class AVRecorderActivity extends AppCompatActivity implements Camera2Fram
     }
 
     @Override
-    public void onPreviewFrame(byte[] data, int width, int height, long timestampNs) {
-        // 带上传感器采集时刻：录制时用它打视频 pts，而不是渲染回读完成的时间
-        mMediaRecorder.onPreviewFrame(IMAGE_FORMAT_I420, data, width, height, timestampNs);
+    public void onPreviewFrame(Image image, long timestampNs) {
+        // 原始图像直接交给 Native（libyuv 转换），带上传感器采集时刻用于打视频 pts
+        mMediaRecorder.onPreviewImage(image, timestampNs);
         mMediaRecorder.requestRender();
     }
 

@@ -201,10 +201,6 @@ void SingleVideoRecorder::Release() {
         m_pFormatCtx = nullptr;
     }
 
-    if(m_SwsContext != nullptr) {
-        sws_freeContext(m_SwsContext);
-        m_SwsContext = nullptr;
-    }
     m_headerWritten = false;
 }
 
@@ -224,30 +220,9 @@ void SingleVideoRecorder::StartH264EncoderThread(SingleVideoRecorder *recorder) 
         }
 
         AVFrame *pFrame = recorder->m_pFrame;
-        AVPixelFormat srcPixFmt = AV_PIX_FMT_NONE;
-        switch (pImage->format) {
-            case IMAGE_FORMAT_RGBA: srcPixFmt = AV_PIX_FMT_RGBA; break;
-            case IMAGE_FORMAT_NV21: srcPixFmt = AV_PIX_FMT_NV21; break;
-            case IMAGE_FORMAT_NV12: srcPixFmt = AV_PIX_FMT_NV12; break;
-            case IMAGE_FORMAT_I420: srcPixFmt = AV_PIX_FMT_YUV420P; break;
-            default:
-                LOGCATE("SingleVideoRecorder::StartH264EncoderThread unsupport format pImage->format=%d", pImage->format);
-                break;
-        }
-
-        if(srcPixFmt != AV_PIX_FMT_NONE && av_frame_make_writable(pFrame) >= 0) {
-            // 统一用 sws 转换：源尺寸取自帧本身，I420 输入也会被拷贝（原来 I420 时编码的是未初始化的数据）
-            recorder->m_SwsContext = sws_getCachedContext(recorder->m_SwsContext,
-                                                          pImage->width, pImage->height, srcPixFmt,
-                                                          recorder->m_frameWidth, recorder->m_frameHeight, AV_PIX_FMT_YUV420P,
-                                                          SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-            if(recorder->m_SwsContext != nullptr) {
-                const uint8_t *srcData[4] = {pImage->ppPlane[0], pImage->ppPlane[1], pImage->ppPlane[2], nullptr};
-                int srcLineSize[4] = {pImage->pLineSize[0], pImage->pLineSize[1], pImage->pLineSize[2], 0};
-                // srcSliceH 是源图像高度（原来用的是目标高度，尺寸不一致时会越界读）
-                sws_scale(recorder->m_SwsContext, srcData, srcLineSize, 0, pImage->height,
-                          pFrame->data, pFrame->linesize);
-
+        if(av_frame_make_writable(pFrame) >= 0) {
+            // 用 libyuv 转成编码器的 YUV420P（尺寸不同时顺带缩放），代替 sws_scale
+            if(recorder->m_converter.Convert(*pImage, pFrame) == 0) {
                 // pts = 采集时刻相对录制起点的毫秒数（time_base 1/1000）。
                 // 第一帧固定为 0，文件从 0 开始；之后保证严格递增
                 int64_t pts = (pImage->captureTimeUs - recorder->m_startTimeUs) / 1000;

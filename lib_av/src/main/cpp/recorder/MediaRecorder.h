@@ -20,6 +20,7 @@
 #include "ThreadSafeQueue.h"
 #include "RecorderClock.h"
 #include "AudioChunk.h"
+#include "YuvConvert.h"
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -35,7 +36,6 @@ extern "C" {
 #include <libavutil/timestamp.h>
 #include <libavutil/audio_fifo.h>
 #include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
 
@@ -74,7 +74,6 @@ public:
     int64_t m_LastPts = -1;                  // 视频：上一帧 pts，保证单调递增
     AVFrame *m_pFrame = nullptr;             // 送入编码器的帧（编码器格式）
     AVFrame *m_pTmpFrame = nullptr;          // 音频：从 FIFO 读出的原始 S16 数据
-    SwsContext *m_pSwsCtx = nullptr;         // 视频：图像格式/尺寸转换
     SwrContext *m_pSwrCtx = nullptr;         // 音频：采样格式转换
 };
 
@@ -192,6 +191,7 @@ private:
     AVCodec         *m_AudioCodec = nullptr;       // 音频编码器（如AAC）
     AVCodec         *m_VideoCodec = nullptr;       // 视频编码器（如H264）
     AVAudioFifo     *m_AudioFifo = nullptr;        // 音频采样 FIFO：凑满编码器要求的帧长再编码
+    EncoderFrameConverter m_VideoConverter;        // 画面转成编码器的 YUV420P（libyuv，仅视频编码线程使用）
 
     ThreadSafeQueue<VideoFrame *> m_VideoFrameQueue{MAX_VIDEO_QUEUE_SIZE};
     ThreadSafeQueue<AudioChunk *> m_AudioFrameQueue{MAX_AUDIO_QUEUE_SIZE};

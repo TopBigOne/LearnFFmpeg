@@ -460,3 +460,97 @@ Java_com_monday_av_media_MediaRecorderContext_native_1SetFragShader(JNIEnv *env,
     pContext->SetFragShader(index, const_cast<char *>(cStr), length + 1);
     env->ReleaseStringUTFChars(str, cStr);
 }
+/**
+ * 从 Java 的 Image.Plane（direct ByteBuffer + stride）取出 YUV_420_888 三个平面并校验。
+ *
+ * 只读取内存，不拷贝；ByteBuffer 必须是 direct 的（Image.Plane.getBuffer() 就是），
+ * 地址只在 Image 关闭前有效，调用方必须在 JNI 返回前用完。
+ * 校验每个平面的容量够不够按 stride 读完整幅图，防止参数异常时越界读。
+ */
+static bool GetAndroid420Planes(JNIEnv *env,
+                                jobject yBuf, jint yRowStride,
+                                jobject uBuf, jint uRowStride,
+                                jobject vBuf, jint vRowStride,
+                                jint uvPixelStride, jint width, jint height,
+                                Android420Planes *out) {
+    if (yBuf == nullptr || uBuf == nullptr || vBuf == nullptr || width <= 0 || height <= 0
+        || uvPixelStride < 1 || yRowStride < width) {
+        LOGCATE("GetAndroid420Planes invalid args [w,h]=[%d,%d] yRowStride=%d uvPixelStride=%d",
+                width, height, yRowStride, uvPixelStride);
+        return false;
+    }
+    auto *y = static_cast<const uint8_t *>(env->GetDirectBufferAddress(yBuf));
+    auto *u = static_cast<const uint8_t *>(env->GetDirectBufferAddress(uBuf));
+    auto *v = static_cast<const uint8_t *>(env->GetDirectBufferAddress(vBuf));
+    if (y == nullptr || u == nullptr || v == nullptr) {
+        LOGCATE("GetAndroid420Planes buffer is not direct");
+        return false;
+    }
+    const int64_t halfW = (width + 1) / 2, halfH = (height + 1) / 2;
+    // 最后一行可能不足 rowStride 字节，只要求覆盖到最后一个有效像素
+    const int64_t needY = (int64_t) (height - 1) * yRowStride + width;
+    const int64_t needU = (halfH - 1) * uRowStride + (halfW - 1) * uvPixelStride + 1;
+    const int64_t needV = (halfH - 1) * vRowStride + (halfW - 1) * uvPixelStride + 1;
+    if (env->GetDirectBufferCapacity(yBuf) < needY || env->GetDirectBufferCapacity(uBuf) < needU
+        || env->GetDirectBufferCapacity(vBuf) < needV) {
+        LOGCATE("GetAndroid420Planes buffer too small for [w,h]=[%d,%d]", width, height);
+        return false;
+    }
+    out->y = y; out->yRowStride = yRowStride;
+    out->u = u; out->uRowStride = uRowStride;
+    out->v = v; out->vRowStride = vRowStride;
+    out->uvPixelStride = uvPixelStride;
+    out->width = width;
+    out->height = height;
+    return true;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_monday_av_media_MediaRecorderContext_native_1OnPreviewImage(JNIEnv *env, jobject thiz,
+                                                                     jobject y_buf, jint y_row_stride,
+                                                                     jobject u_buf, jint u_row_stride,
+                                                                     jobject v_buf, jint v_row_stride,
+                                                                     jint uv_pixel_stride,
+                                                                     jint width, jint height,
+                                                                     jlong capture_time_ns) {
+    MediaRecorderContext *pContext = MediaRecorderContext::GetContext(env, thiz);
+    if (pContext == nullptr) return;
+    Android420Planes planes;
+    if (!GetAndroid420Planes(env, y_buf, y_row_stride, u_buf, u_row_stride, v_buf, v_row_stride,
+                             uv_pixel_stride, width, height, &planes)) {
+        return;
+    }
+    int64_t captureTimeUs = capture_time_ns > 0 ? capture_time_ns / 1000 : 0;
+    pContext->OnPreviewImage(planes, captureTimeUs);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_monday_av_media_YuvUtil_nativeAndroid420ToI420(JNIEnv *env, jclass clazz,
+                                                        jobject y_buf, jint y_row_stride,
+                                                        jobject u_buf, jint u_row_stride,
+                                                        jobject v_buf, jint v_row_stride,
+                                                        jint uv_pixel_stride,
+                                                        jint width, jint height,
+                                                        jbyteArray dst) {
+    Android420Planes planes;
+    if (dst == nullptr || !GetAndroid420Planes(env, y_buf, y_row_stride, u_buf, u_row_stride,
+                                               v_buf, v_row_stride, uv_pixel_stride, width, height, &planes)) {
+        return JNI_FALSE;
+    }
+    const int halfW = (width + 1) / 2, halfH = (height + 1) / 2;
+    const int64_t need = (int64_t) width * height + (int64_t) halfW * halfH * 2;
+    if (env->GetArrayLength(dst) < need) {
+        LOGCATE("YuvUtil_nativeAndroid420ToI420 dst too small");
+        return JNI_FALSE;
+    }
+    // Critical 区间内只做一次 libyuv 转换，不调用其他 JNI，GC 只被短暂阻塞
+    auto *out = static_cast<uint8_t *>(env->GetPrimitiveArrayCritical(dst, nullptr));
+    if (out == nullptr) return JNI_FALSE;
+    uint8_t *outU = out + (size_t) width * height;
+    uint8_t *outV = outU + (size_t) halfW * halfH;
+    bool ok = YuvConvert::Android420ToI420(planes, out, width, outU, halfW, outV, halfW);
+    env->ReleasePrimitiveArrayCritical(dst, out, 0);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}

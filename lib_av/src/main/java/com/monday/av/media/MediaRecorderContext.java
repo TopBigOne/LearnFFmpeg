@@ -1,6 +1,13 @@
 package com.monday.av.media;
 
+import java.nio.ByteBuffer;
+
 public abstract class MediaRecorderContext {
+    static {
+        // 原来依赖 FFMediaPlayer 先被加载时顺带加载 so，单独使用录制模块会找不到 native 方法
+        System.loadLibrary("learn-ffmpeg");
+    }
+
     public static final int IMAGE_FORMAT_RGBA = 0x01;
     public static final int IMAGE_FORMAT_NV21 = 0x02;
     public static final int IMAGE_FORMAT_NV12 = 0x03;
@@ -31,6 +38,16 @@ public abstract class MediaRecorderContext {
      * @param captureTimeNs 画面的采集时刻，SystemClock.elapsedRealtimeNanos() 时基；<=0 表示未知
      */
     protected native void native_OnPreviewFrame(int format, byte[] data, int width, int height, long captureTimeNs);
+
+    /**
+     * 相机原始图像（YUV_420_888 三个平面，direct ByteBuffer），Native 层用 libyuv 直接转进渲染缓冲。
+     * @param captureTimeNs 画面的采集时刻，SystemClock.elapsedRealtimeNanos() 时基；<=0 表示未知
+     */
+    protected native void native_OnPreviewImage(ByteBuffer y, int yRowStride,
+                                                ByteBuffer u, int uRowStride,
+                                                ByteBuffer v, int vRowStride,
+                                                int uvPixelStride, int width, int height,
+                                                long captureTimeNs);
 
     protected native int native_StopRecord();
 

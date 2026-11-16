@@ -175,6 +175,31 @@ void GLCameraRender::RenderVideoFrame(NativeImage *pImage, int64_t captureTimeUs
     //NativeImageUtil::DumpNativeImage(&m_RenderImage, "/sdcard", "camera");
 }
 
+void GLCameraRender::RenderAndroid420Frame(const Android420Planes &planes, int64_t captureTimeUs) {
+    if(planes.y == nullptr || planes.width <= 0 || planes.height <= 0) return;
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    // 渲染缓冲统一为 I420，尺寸或格式变化时重新分配
+    if (m_RenderImage.width != planes.width || m_RenderImage.height != planes.height
+        || m_RenderImage.format != IMAGE_FORMAT_I420 || m_RenderImage.ppPlane[0] == nullptr) {
+        NativeImageUtil::FreeNativeImage(&m_RenderImage);
+        memset(&m_RenderImage, 0, sizeof(NativeImage));
+        m_RenderImage.format = IMAGE_FORMAT_I420;
+        m_RenderImage.width = planes.width;
+        m_RenderImage.height = planes.height;
+        NativeImageUtil::AllocNativeImage(&m_RenderImage);
+        if (m_RenderImage.ppPlane[0] == nullptr) return;
+    }
+
+    if (!YuvConvert::Android420ToI420(planes,
+                                      m_RenderImage.ppPlane[0], m_RenderImage.pLineSize[0],
+                                      m_RenderImage.ppPlane[1], m_RenderImage.pLineSize[1],
+                                      m_RenderImage.ppPlane[2], m_RenderImage.pLineSize[2])) {
+        return;
+    }
+    m_RenderImageTimeUs = captureTimeUs;
+    m_HasNewFrame = true;
+}
+
 /**
  * @brief 反初始化渲染器
  * 释放扩展图像和着色器缓冲区资源

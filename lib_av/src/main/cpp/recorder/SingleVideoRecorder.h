@@ -14,12 +14,12 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
-#include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
 }
 
 #include "ThreadSafeQueue.h"
 #include "RecorderClock.h"
+#include "YuvConvert.h"
 #include "ImageDef.h"
 #include <thread>
 #include <atomic>
@@ -110,7 +110,7 @@ private:
     AVCodecContext *m_pCodecCtx = nullptr;          // 编码器上下文
     AVFormatContext *m_pFormatCtx = nullptr;        // 格式上下文
     thread *m_encodeThread = nullptr;               // 编码线程
-    SwsContext *m_SwsContext = nullptr;             // 图像格式转换上下文
+    EncoderFrameConverter m_converter;              // 画面转成编码器的 YUV420P（libyuv，仅编码线程使用）
     std::atomic<bool> m_started{false};             // 已成功开始录制
     std::atomic<bool> m_exit{false};                // 退出标志
     bool m_headerWritten = false;

@@ -3,6 +3,8 @@ package com.monday.av.media;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
+import android.media.Image;
 import android.opengl.GLSurfaceView;
 import android.util.Log;
 
@@ -60,6 +62,23 @@ public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceVi
      */
     public void onPreviewFrame(int format, byte[] data, int width, int height, long captureTimeNs) {
         native_OnPreviewFrame(format, data, width, height, captureTimeNs);
+    }
+
+    /**
+     * 送入一帧相机原始图像（推荐）：Native 层用 libyuv 直接从 Image 的平面转换，
+     * Java 层不分配内存、不做逐像素拷贝。必须在 Image 关闭前调用（函数返回前就已用完）。
+     *
+     * @param image         格式必须是 YUV_420_888
+     * @param captureTimeNs 画面的采集时刻，{@link android.os.SystemClock#elapsedRealtimeNanos()} 时基；0 表示未知
+     */
+    public void onPreviewImage(Image image, long captureTimeNs) {
+        if (image == null || image.getFormat() != ImageFormat.YUV_420_888) return;
+        Image.Plane[] planes = image.getPlanes();
+        native_OnPreviewImage(
+                planes[0].getBuffer(), planes[0].getRowStride(),
+                planes[1].getBuffer(), planes[1].getRowStride(),
+                planes[2].getBuffer(), planes[2].getRowStride(),
+                planes[1].getPixelStride(), image.getWidth(), image.getHeight(), captureTimeNs);
     }
 
     /** 不带采集时刻的旧接口：以到达时间近似，音视频同步精度较差 */

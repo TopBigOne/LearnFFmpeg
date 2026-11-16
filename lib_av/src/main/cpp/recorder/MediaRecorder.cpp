@@ -15,16 +15,6 @@
 // 单次纠偏的上限：超过它说明时间戳本身不可信（例如时基不一致），宁可不纠也不要塞进几分钟的静音
 #define MAX_AUDIO_CORRECTION_US 5000000
 
-static AVPixelFormat ToAVPixelFormat(int imageFormat) {
-    switch (imageFormat) {
-        case IMAGE_FORMAT_RGBA: return AV_PIX_FMT_RGBA;
-        case IMAGE_FORMAT_NV21: return AV_PIX_FMT_NV21;
-        case IMAGE_FORMAT_NV12: return AV_PIX_FMT_NV12;
-        case IMAGE_FORMAT_I420: return AV_PIX_FMT_YUV420P;
-        default:                return AV_PIX_FMT_NONE;
-    }
-}
-
 /**
  * @brief MediaRecorder构造函数
  * @param url 输出文件路径
@@ -669,30 +659,15 @@ int MediaRecorder::EncodeVideoFrame(VideoFrame *videoFrame) {
     AVOutputStream *ost = &m_VideoStream;
     AVCodecContext *c = ost->m_pCodecCtx;
 
-    AVPixelFormat srcPixFmt = ToAVPixelFormat(videoFrame->format);
-    if (srcPixFmt == AV_PIX_FMT_NONE) {
-        LOGCATE("MediaRecorder::EncodeVideoFrame unSupport format pImage->format=%d", videoFrame->format);
-        return -1;
-    }
-
     /* 编码器可能仍持有上一帧的引用，写入前确保可写 */
     if (av_frame_make_writable(ost->m_pFrame) < 0) return -1;
 
-    // 统一用 sws 转换到编码器格式和尺寸：
-    // 源尺寸取自帧本身（不是编码器尺寸），I420 输入也会被正确拷贝（原来 I420 分支什么都没写进去）
-    ost->m_pSwsCtx = sws_getCachedContext(ost->m_pSwsCtx,
-                                          videoFrame->width, videoFrame->height, srcPixFmt,
-                                          c->width, c->height, c->pix_fmt,
-                                          SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-    if (!ost->m_pSwsCtx) {
-        LOGCATE("MediaRecorder::EncodeVideoFrame Could not initialize the conversion context");
+    // 转换到编码器的 YUV420P（尺寸不同时顺带缩放）。用 libyuv 代替 sws_scale：
+    // 实测 480x640 RGBA→I420，sws_scale 约 11ms/帧，是录制线程最大的 CPU 开销
+    if (m_VideoConverter.Convert(*videoFrame, ost->m_pFrame) != 0) {
+        LOGCATE("MediaRecorder::EncodeVideoFrame convert fail, format=%d", videoFrame->format);
         return -1;
     }
-    // sws_scale 内部按 4 个平面读取，NativeImage 只有 3 个，先拷到 4 元素数组避免越界读
-    const uint8_t *srcData[4] = {videoFrame->ppPlane[0], videoFrame->ppPlane[1], videoFrame->ppPlane[2], nullptr};
-    int srcLineSize[4] = {videoFrame->pLineSize[0], videoFrame->pLineSize[1], videoFrame->pLineSize[2], 0};
-    sws_scale(ost->m_pSwsCtx, srcData, srcLineSize, 0, videoFrame->height,
-              ost->m_pFrame->data, ost->m_pFrame->linesize);
 
     // pts = 采集时刻相对录制起点的毫秒数（time_base 1/1000）。
     // 第一帧固定为 0：起点到第一帧之间沿用第一帧画面，文件不会以一段空白时间轴开头；
@@ -711,7 +686,5 @@ void MediaRecorder::CloseStream(AVOutputStream *ost) {
     av_frame_free(&ost->m_pFrame);
     // AVFrame 必须用 av_frame_free 释放（原来用 av_free 会泄漏其中的缓冲区）
     av_frame_free(&ost->m_pTmpFrame);
-    sws_freeContext(ost->m_pSwsCtx);
-    ost->m_pSwsCtx = nullptr;
     swr_free(&ost->m_pSwrCtx);
 }

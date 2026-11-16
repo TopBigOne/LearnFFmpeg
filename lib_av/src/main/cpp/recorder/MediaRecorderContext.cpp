@@ -339,6 +339,11 @@ void MediaRecorderContext::OnPreviewFrame(int format, uint8_t *pBuffer, int widt
     GLCameraRender::GetInstance()->RenderVideoFrame(&nativeImage, captureTimeUs);
 }
 
+void MediaRecorderContext::OnPreviewImage(const Android420Planes &planes, int64_t captureTimeUs)
+{
+	GLCameraRender::GetInstance()->RenderAndroid420Frame(planes, captureTimeUs);
+}
+
 /**
  * @brief 设置变换矩阵
  * @param translateX X轴平移

@@ -123,6 +123,12 @@ public:
 	void OnPreviewFrame(int format, uint8_t *pBuffer, int width, int height, int64_t captureTimeUs);
 
 	/**
+	 * @brief 处理相机原始图像（Android YUV_420_888 的三个平面），直接转换进渲染缓冲
+	 * @param captureTimeUs 画面的采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
+	 */
+	void OnPreviewImage(const Android420Planes &planes, int64_t captureTimeUs);
+
+	/**
 	 * @brief 停止录制
 	 * @return 0表示成功，负数表示失败
 	 */

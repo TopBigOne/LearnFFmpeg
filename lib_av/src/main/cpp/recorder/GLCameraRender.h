@@ -10,6 +10,7 @@
 #define LEARNFFMPEG_MASTER_GLCAMERARENDER_H
 #include <thread>
 #include <ImageDef.h>
+#include "YuvConvert.h"
 #include "VideoRender.h"
 #include <GLES3/gl3.h>
 #include <detail/type_mat.hpp>
@@ -74,6 +75,14 @@ public:
      * @param captureTimeUs 采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
      */
     void RenderVideoFrame(NativeImage *pImage, int64_t captureTimeUs);
+
+    /**
+     * @brief 渲染一帧相机原始图像（Android YUV_420_888），用 libyuv 直接转成 I420 写入渲染缓冲
+     *
+     * 相比在 Java 层先转成 byte[] 再传进来，少一次整帧拷贝，Java 层也不再分配内存
+     * @param captureTimeUs 采集时刻（CLOCK_BOOTTIME 微秒），0 表示未知
+     */
+    void RenderAndroid420Frame(const Android420Planes &planes, int64_t captureTimeUs);
 
     /**
      * @brief 反初始化，释放资源
