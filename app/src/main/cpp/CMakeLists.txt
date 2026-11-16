@@ -1,7 +1,7 @@
 # Sets the minimum version of CMake required to build the native library.
 cmake_minimum_required(VERSION 3.4.1)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++17")
 
 set(jnilibs ${CMAKE_SOURCE_DIR}/../jniLibs)
 set(libname learn-ffmpeg)
@@ -10,6 +10,7 @@ include_directories(
         include
         glm
         common
+        ${CMAKE_SOURCE_DIR}/thirdparty/sonic
         ${CMAKE_SOURCE_DIR}/recorder
         ${CMAKE_SOURCE_DIR}/util
         ${CMAKE_SOURCE_DIR}/player
@@ -37,7 +38,11 @@ file(GLOB src-files
         ${CMAKE_SOURCE_DIR}/recorder/MediaRecorderContext.cpp
         ${CMAKE_SOURCE_DIR}/recorder/GLCameraRender.cpp
         ${CMAKE_SOURCE_DIR}/recorder/MediaRecorder.cpp
+        ${CMAKE_SOURCE_DIR}/thirdparty/sonic/sonic.c
         )
+
+# Oboe 以源码编译成静态库（说明见 thirdparty/README.md），头文件通过 target 的 PUBLIC include 传递
+add_subdirectory(${CMAKE_SOURCE_DIR}/thirdparty/oboe ${CMAKE_CURRENT_BINARY_DIR}/oboe)
 
 add_library( # Sets the name of the library.
              ${libname}
@@ -96,6 +101,7 @@ add_library( # Sets the name of the library.
 #set_target_properties(${libname} PROPERTIES LINK_FLAGS -fsanitize=address)
 
 set(third-party-libs
+        oboe
         avformat
         avcodec
         avfilter

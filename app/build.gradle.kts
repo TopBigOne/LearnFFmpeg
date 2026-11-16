@@ -28,7 +28,7 @@ android {
             cmake {
                 arguments("-DANDROID_TOOLCHAIN=clang", "-DANDROID_ARM_MODE=arm", "-DANDROID_STL=c++_static")
                 cFlags("-ferror-limit=0 -fPIC")
-                cppFlags("-std=c++11 -frtti -fexceptions")
+                cppFlags("-std=c++17 -frtti -fexceptions")
             }
         }
     }
