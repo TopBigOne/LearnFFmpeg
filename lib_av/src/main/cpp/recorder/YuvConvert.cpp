@@ -34,17 +34,27 @@ bool Android420ToI420(const Android420Planes &src,
 }
 
 int EncoderFrameConverter::Convert(const NativeImage &src, AVFrame *dst) {
-    if (dst == nullptr || dst->format != AV_PIX_FMT_YUV420P || src.ppPlane[0] == nullptr
-        || src.width <= 0 || src.height <= 0) {
+    if (dst == nullptr || dst->format != AV_PIX_FMT_YUV420P) return -1;
+    return ConvertToI420(src, dst->data[0], dst->linesize[0], dst->data[1], dst->linesize[1],
+                         dst->data[2], dst->linesize[2], dst->width, dst->height);
+}
+
+int EncoderFrameConverter::ConvertToI420(const NativeImage &src,
+                                         uint8_t *dstY, int dstStrideY,
+                                         uint8_t *dstU, int dstStrideU,
+                                         uint8_t *dstV, int dstStrideV,
+                                         int dstWidth, int dstHeight) {
+    if (dstY == nullptr || src.ppPlane[0] == nullptr || src.width <= 0 || src.height <= 0
+        || dstWidth <= 0 || dstHeight <= 0) {
         return -1;
     }
     const int w = src.width;
     const int h = src.height;
-    const bool needScale = w != dst->width || h != dst->height;
+    const bool needScale = w != dstWidth || h != dstHeight;
 
-    // 尺寸一致直接写入编码帧；否则先写到源尺寸的 I420 中间缓冲
-    uint8_t *y = dst->data[0], *u = dst->data[1], *v = dst->data[2];
-    int strideY = dst->linesize[0], strideU = dst->linesize[1], strideV = dst->linesize[2];
+    // 尺寸一致直接写入目标；否则先写到源尺寸的 I420 中间缓冲
+    uint8_t *y = dstY, *u = dstU, *v = dstV;
+    int strideY = dstStrideY, strideU = dstStrideU, strideV = dstStrideV;
     if (needScale) {
         const int halfW = (w + 1) / 2, halfH = (h + 1) / 2;
         const size_t size = static_cast<size_t>(w) * h + static_cast<size_t>(halfW) * halfH * 2;
@@ -91,10 +101,8 @@ int EncoderFrameConverter::Convert(const NativeImage &src, AVFrame *dst) {
 
     if (needScale) {
         ret = libyuv::I420Scale(y, strideY, u, strideU, v, strideV, w, h,
-                                dst->data[0], dst->linesize[0],
-                                dst->data[1], dst->linesize[1],
-                                dst->data[2], dst->linesize[2],
-                                dst->width, dst->height, libyuv::kFilterBilinear);
+                                dstY, dstStrideY, dstU, dstStrideU, dstV, dstStrideV,
+                                dstWidth, dstHeight, libyuv::kFilterBilinear);
         if (ret != 0) {
             LOGCATE("EncoderFrameConverter::Convert I420Scale fail ret=%d", ret);
         }

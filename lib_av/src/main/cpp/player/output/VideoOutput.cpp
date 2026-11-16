@@ -98,11 +98,13 @@ void VideoOutput::StartRecording(const std::string &path) {
     }
     std::lock_guard<std::mutex> lock(m_RecorderMutex);
     if (m_Recorder) return;
-    // 每帧都要软编码，CPU 开销很大，所以只在显式设置了路径时开启
+    // 每帧都要重新编码，只在显式设置了路径时开启。解码帧在 CPU 内存里，优先用 MediaCodec 的输入缓冲方式
+    // 硬件编码，不可用时回退到 x264
     const int fps = 25;
     long bitRate = static_cast<long>(m_RenderWidth * m_RenderHeight * fps * 0.2);
     std::unique_ptr<SingleVideoRecorder> recorder(
-            new SingleVideoRecorder(path.c_str(), m_RenderWidth, m_RenderHeight, bitRate, fps));
+            new SingleVideoRecorder(path.c_str(), m_RenderWidth, m_RenderHeight, bitRate, fps,
+                                    SingleVideoRecorder::EncodeMode::HardwareBuffer));
     if (recorder->StartRecord() != 0) {
         LOGCATE("VideoOutput::StartRecording StartRecord fail, path=%s", path.c_str());
         return;

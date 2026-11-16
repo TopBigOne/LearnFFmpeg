@@ -10,6 +10,7 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 }
 
@@ -45,6 +46,71 @@ static inline int WriteRecorderHeader(AVFormatContext *ctx) {
     }
     av_dict_free(&opts);
     return ret;
+}
+
+// ---------------- 硬件编码（MediaCodec）视频流的封装辅助 ----------------
+
+/** MediaCodec 输出的时间戳单位（微秒） */
+static const AVRational kRecorderMicrosecondTimeBase = {1, 1000000};
+
+/**
+ * 为硬件编码器创建 H.264 视频流。编码器在 MediaCodec 里，这里只手工描述码流参数，
+ * SPS/PPS（extradata）等编码器输出后用 SetHwVideoExtradata 填。
+ * 时间基取 90kHz：视频常用时间基，1 小时的时长也不会让 32 位的字段溢出。
+ */
+static inline AVStream *AddHwH264Stream(AVFormatContext *ctx, int width, int height, long bitRate, int fps) {
+    AVStream *st = avformat_new_stream(ctx, nullptr);
+    if (st == nullptr) return nullptr;
+    st->id = ctx->nb_streams - 1;
+    st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    st->codecpar->codec_id = AV_CODEC_ID_H264;
+    st->codecpar->width = width;
+    st->codecpar->height = height;
+    st->codecpar->format = AV_PIX_FMT_YUV420P;
+    st->codecpar->bit_rate = bitRate;
+    st->time_base = AVRational{1, 90000};
+    st->avg_frame_rate = AVRational{fps, 1};
+    return st;
+}
+
+/**
+ * 填入 SPS/PPS。MediaCodec 给出的是 Annex B 格式（00 00 00 01 起始码），
+ * mp4 muxer 会把它转成 avcC，并把每帧码流转成长度前缀格式。
+ */
+static inline bool SetHwVideoExtradata(AVStream *st, const uint8_t *data, size_t size) {
+    AVCodecParameters *par = st->codecpar;
+    av_freep(&par->extradata);
+    par->extradata = static_cast<uint8_t *>(av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE));
+    if (par->extradata == nullptr) {
+        par->extradata_size = 0;
+        return false;
+    }
+    memcpy(par->extradata, data, size);
+    par->extradata_size = static_cast<int>(size);
+    return true;
+}
+
+/**
+ * 把编码器输出的一帧码流打包成 AVPacket，时间戳单位为微秒（kRecorderMicrosecondTimeBase）。
+ * 编码器已关闭 B 帧，dts == pts；仍保证 dts 严格递增，防止个别编码器输出的时间戳重复。
+ * @param lastDtsUs 上一包的 dts，调用方保存，初始为 -1
+ * @return 新分配的包，调用方用 av_packet_free 释放；失败返回 nullptr
+ */
+static inline AVPacket *MakeHwVideoPacket(const uint8_t *data, size_t size, int64_t ptsUs, bool keyFrame,
+                                          int64_t *lastDtsUs) {
+    AVPacket *pkt = av_packet_alloc();
+    if (pkt == nullptr || av_new_packet(pkt, static_cast<int>(size)) < 0) {
+        av_packet_free(&pkt);
+        return nullptr;
+    }
+    memcpy(pkt->data, data, size);
+    int64_t dts = ptsUs;
+    if (dts <= *lastDtsUs) dts = *lastDtsUs + 1;
+    *lastDtsUs = dts;
+    pkt->pts = ptsUs < dts ? dts : ptsUs;
+    pkt->dts = dts;
+    if (keyFrame) pkt->flags |= AV_PKT_FLAG_KEY;
+    return pkt;
 }
 
 #endif //LEARNFFMPEG_RECORDERMUXER_H

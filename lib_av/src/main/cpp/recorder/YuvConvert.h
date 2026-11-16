@@ -53,6 +53,13 @@ public:
     /** @return 0 成功，负数失败（不支持的格式或参数错误） */
     int Convert(const NativeImage &src, AVFrame *dst);
 
+    /** 同上，目标是调用方给出的 I420 三个平面（dstWidth x dstHeight），用于写入 MediaCodec 输入缓冲 */
+    int ConvertToI420(const NativeImage &src,
+                      uint8_t *dstY, int dstStrideY,
+                      uint8_t *dstU, int dstStrideU,
+                      uint8_t *dstV, int dstStrideV,
+                      int dstWidth, int dstHeight);
+
 private:
     std::vector<uint8_t> m_Scratch;
 };

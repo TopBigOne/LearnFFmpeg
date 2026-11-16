@@ -173,8 +173,21 @@ MediaRecorderContext::StartRecord(int recorderType, const char *outUrl, int fram
 		case RECORDER_TYPE_SINGLE_VIDEO: {  // 单视频录制
 			if(GetVideoRecorder() != nullptr) return 0;
 			// 相机图像是横向的，预览/录制时旋转了 90 度，所以宽高互换
-			auto recorder = std::make_shared<SingleVideoRecorder>(outUrl, frameHeight, frameWidth, videoBitRate, fps);
+			// 优先硬件编码（画面由 GL 直接画到编码器 Surface），绑定失败则改用软件编码重新开始
+			auto recorder = std::make_shared<SingleVideoRecorder>(outUrl, frameHeight, frameWidth, videoBitRate, fps,
+			                                                      SingleVideoRecorder::EncodeMode::HardwareSurface);
 			result = recorder->StartRecord();
+			if(result == 0 && recorder->GetEncodeMode() == SingleVideoRecorder::EncodeMode::HardwareSurface
+			   && !GLCameraRender::GetInstance()->AttachEncoder(recorder->GetVideoInputWindow(),
+			                                                    recorder->GetVideoWidth(), recorder->GetVideoHeight(),
+			                                                    recorder.get())) {
+				LOGCATE("MediaRecorderContext::StartRecord attach encoder surface fail, fall back to software encoding");
+				recorder->StopRecord();
+				remove(outUrl);
+				recorder = std::make_shared<SingleVideoRecorder>(outUrl, frameHeight, frameWidth, videoBitRate, fps,
+				                                                 SingleVideoRecorder::EncodeMode::Software);
+				result = recorder->StartRecord();
+			}
 			if(result == 0) {
 				std::lock_guard<std::mutex> lock(m_mutex);
 				m_pVideoRecorder = recorder;
@@ -254,11 +267,14 @@ int MediaRecorderContext::StopRecord() {
 	}
 	UpdateReadbackState();
 
-	if(videoRecorder) videoRecorder->StopRecord();
+	if(videoRecorder) {
+		GLCameraRender::GetInstance()->DetachEncoder(videoRecorder.get());
+		videoRecorder->StopRecord();
+	}
 	if(audioRecorder) audioRecorder->StopRecord();
 	if(avRecorder) {
 		// 先解绑：返回后 GL 线程不会再往编码器 Surface 上画，编码器才能安全地结束
-		if(avRecorder->IsHardwareVideo()) GLCameraRender::GetInstance()->DetachEncoder();
+		GLCameraRender::GetInstance()->DetachEncoder(avRecorder.get());
 		avRecorder->StopRecord();
 	}
 	// 离开作用域时，若回调线程已用完，录制器在这里析构
@@ -270,7 +286,8 @@ void MediaRecorderContext::UpdateReadbackState() {
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		// 硬件编码直接把画面画到编码器 Surface，不需要 glReadPixels 回读
-		needVideo = m_pVideoRecorder != nullptr || (m_pAVRecorder != nullptr && !m_pAVRecorder->IsHardwareVideo());
+		needVideo = (m_pVideoRecorder != nullptr && m_pVideoRecorder->GetEncodeMode() != SingleVideoRecorder::EncodeMode::HardwareSurface)
+		            || (m_pAVRecorder != nullptr && !m_pAVRecorder->IsHardwareVideo());
 	}
 	GLCameraRender::GetInstance()->SetReadbackEnabled(needVideo);
 }

@@ -92,15 +92,17 @@ public:
      * @brief 绑定硬件编码器的输入 Surface：之后每个新画面除了显示，还会直接画到编码器上
      *
      * 在调用线程上同步创建 EGLSurface（使用当前 GL 上下文的 display 和 config），
-     * 失败时返回 false，调用方应回退到软件编码（回读 + x264）
+     * 失败时返回 false，调用方应回退到软件编码（回读 + x264）。同一时间只能绑定一个编码器，
+     * 已有编码器绑定时也返回 false
      * @param sink 为每帧分配 pts，返回负数表示该帧不录；在 DetachEncoder 之前必须保持有效
      */
     bool AttachEncoder(ANativeWindow *window, int width, int height, VideoEncoderSink *sink);
 
     /**
      * @brief 解绑编码器：返回后 GL 线程不会再往编码器 Surface 上画，可以安全地结束编码器
+     * @param sink 只解绑这个录制器绑定的编码器；传 nullptr 表示无论是谁都解绑
      */
-    void DetachEncoder();
+    void DetachEncoder(VideoEncoderSink *sink = nullptr);
 
     /**
      * @brief 反初始化，释放资源

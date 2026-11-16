@@ -650,8 +650,11 @@ void GLCameraRender::OnDrawFrame() {
 
 bool GLCameraRender::AttachEncoder(ANativeWindow *window, int width, int height, VideoEncoderSink *sink) {
     std::lock_guard<std::mutex> lock(m_EncoderMutex);
-    DetachEncoderLocked();
     if (window == nullptr || sink == nullptr || width <= 0 || height <= 0) return false;
+    if (m_EncoderSurface != EGL_NO_SURFACE) {
+        LOGCATE("GLCameraRender::AttachEncoder another encoder is attached");
+        return false;
+    }
     if (m_EglDisplay == EGL_NO_DISPLAY || m_EglConfig == nullptr) {
         LOGCATE("GLCameraRender::AttachEncoder GL context not ready");
         return false;
@@ -673,8 +676,9 @@ bool GLCameraRender::AttachEncoder(ANativeWindow *window, int width, int height,
     return true;
 }
 
-void GLCameraRender::DetachEncoder() {
+void GLCameraRender::DetachEncoder(VideoEncoderSink *sink) {
     std::lock_guard<std::mutex> lock(m_EncoderMutex);
+    if (sink != nullptr && sink != m_EncoderSink) return;
     DetachEncoderLocked();
 }
 
