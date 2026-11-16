@@ -15,6 +15,8 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.util.Log;
 import android.view.SurfaceHolder;
+import android.view.View;
+import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.Toast;
 
@@ -46,6 +48,10 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
     private SeekBar mSeekBar = null;
     private boolean mIsTouch = false;
     private String mVideoPath;
+    // 点击倍速按钮依次切换；Surface 重建时播放器会重新创建，倍速由这里保持
+    private static final float[] SPEEDS = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
+    private int mSpeedIndex = 2;
+    private Button mSpeedButton = null;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -53,6 +59,18 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
         setContentView(R.layout.activity_media_player);
         mSurfaceView = findViewById(R.id.surface_view);
         mSurfaceView.getHolder().addCallback(this);
+
+        mSpeedButton = findViewById(R.id.speed_button);
+        mSpeedButton.setVisibility(View.VISIBLE);
+        mSpeedButton.setText(SPEEDS[mSpeedIndex] + "x");
+        mSpeedButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                mSpeedIndex = (mSpeedIndex + 1) % SPEEDS.length;
+                mSpeedButton.setText(SPEEDS[mSpeedIndex] + "x");
+                if (mMediaPlayer != null) mMediaPlayer.setPlaybackSpeed(SPEEDS[mSpeedIndex]);
+            }
+        });
 
         mSeekBar = findViewById(R.id.seek_bar);
         mSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -115,6 +133,7 @@ public class NativeMediaPlayerActivity extends AppCompatActivity implements Surf
         mMediaPlayer = new FFMediaPlayer();
         mMediaPlayer.addEventCallback(this);
         mMediaPlayer.init(mVideoPath, VIDEO_RENDER_ANWINDOW, surfaceHolder.getSurface());
+        mMediaPlayer.setPlaybackSpeed(SPEEDS[mSpeedIndex]);
     }
 
     @Override

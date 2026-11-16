@@ -76,6 +76,12 @@ void FFMediaPlayer::SeekToPosition(float position) {
     if (m_Player) m_Player->SeekTo(position);
 }
 
+bool FFMediaPlayer::SetPlaybackSpeed(float speed) {
+    if (!m_Player) return false;
+    m_Player->SetSpeed(speed);
+    return true;
+}
+
 long FFMediaPlayer::GetMediaParams(int paramType) {
     if (!m_Player) return 0;
     switch (paramType) {

@@ -54,6 +54,8 @@ public:
     /** 目前支持 MEDIA_PARAM_RECORD_PATH（obj 为 jstring），需在 Play 之前调用 */
     void SetMediaParams(int paramType, jobject obj) override;
 
+    bool SetPlaybackSpeed(float speed) override;
+
 private:
     /** 返回当前线程（必须已附加到 JVM，例如 Java 调用线程）的 JNIEnv，不会主动 Attach */
     JNIEnv *GetJNIEnv(bool *isAttach) override;

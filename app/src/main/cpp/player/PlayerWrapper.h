@@ -30,6 +30,7 @@ public:
     void SeekToPosition(float position);
     long GetMediaParams(int paramType);
     void SetMediaParams(int paramType, jobject obj);
+    bool SetPlaybackSpeed(float speed);
 
 private:
     MediaPlayer* m_MediaPlayer = nullptr;

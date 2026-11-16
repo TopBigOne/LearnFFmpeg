@@ -107,6 +107,14 @@ long PlayerWrapper::GetMediaParams(int paramType) {
  * @param paramType 参数类型
  * @param obj 参数对象
  */
+/**
+ * @brief 设置倍速
+ * @return 当前播放器是否支持倍速（硬解播放器 HWCodecPlayer 不支持）
+ */
+bool PlayerWrapper::SetPlaybackSpeed(float speed) {
+    return m_MediaPlayer != nullptr && m_MediaPlayer->SetPlaybackSpeed(speed);
+}
+
 void PlayerWrapper::SetMediaParams(int paramType, jobject obj) {
     if(m_MediaPlayer) {
         m_MediaPlayer->SetMediaParams(paramType, obj);

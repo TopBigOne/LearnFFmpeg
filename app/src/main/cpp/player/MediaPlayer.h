@@ -100,6 +100,13 @@ public:
     virtual void SetMediaParams(int paramType, jobject obj){}
 
     /**
+     * @brief 设置倍速（虚函数，默认不支持）
+     * @param speed 倍速，范围 [0.25, 4.0]，超出时截断
+     * @return 是否支持倍速
+     */
+    virtual bool SetPlaybackSpeed(float speed) { return false; }
+
+    /**
      * @brief 获取JNI环境（纯虚函数）
      * @param isAttach 是否需要附加到当前线程
      * @return JNI环境指针

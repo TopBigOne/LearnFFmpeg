@@ -129,6 +129,15 @@ Java_com_byteflow_learnffmpeg_media_FFMediaPlayer_native_1SetMediaParams(JNIEnv 
     }
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_byteflow_learnffmpeg_media_FFMediaPlayer_native_1SetPlaybackSpeed(JNIEnv *env, jobject thiz,
+                                                                           jlong player_handle,
+                                                                           jfloat speed) {
+    if (player_handle == 0) return JNI_FALSE;
+    PlayerWrapper *ffMediaPlayer = reinterpret_cast<PlayerWrapper *>(player_handle);
+    return ffMediaPlayer->SetPlaybackSpeed(speed) ? JNI_TRUE : JNI_FALSE;
+}
+
 /*
  * Class:     com_byteflow_learnffmpeg_media_FFMediaPlayer
  * Method:    native_Pause

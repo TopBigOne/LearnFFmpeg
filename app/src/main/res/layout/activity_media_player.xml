@@ -17,6 +17,17 @@
             android:layout_height="match_parent"
             android:layout_centerInParent="true"
             android:id="@+id/surface_view"/>
+        <!-- 倍速切换，只有支持倍速的页面才显示 -->
+        <Button
+            android:id="@+id/speed_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentTop="true"
+            android:layout_alignParentEnd="true"
+            android:layout_margin="8dp"
+            android:minWidth="64dp"
+            android:visibility="gone"
+            android:text="1.0x"/>
     </RelativeLayout>
     <SeekBar
         app:layout_constraintTop_toBottomOf="@id/surface_root"

@@ -104,6 +104,15 @@ public class FFMediaPlayer {
         native_Stop(mNativePlayerHandle);
     }
 
+    /**
+     * 倍速播放（变速不变调），范围 [0.25, 4.0]，超出时截断。任意时刻都可以调用，stop 后重新播放仍然保持。
+     *
+     * @return 当前播放器是否支持倍速：软解播放器（FFMEDIA_PLAYER）支持，硬解播放器暂不支持
+     */
+    public boolean setPlaybackSpeed(float speed) {
+        return native_SetPlaybackSpeed(mNativePlayerHandle, speed);
+    }
+
     public void unInit() {
         long handle = mNativePlayerHandle;
         mNativePlayerHandle = 0;
@@ -144,6 +153,8 @@ public class FFMediaPlayer {
     private native void native_Pause(long playerHandle);
 
     private native void native_Stop(long playerHandle);
+
+    private native boolean native_SetPlaybackSpeed(long playerHandle, float speed);
 
     private native void native_UnInit(long playerHandle);
 
