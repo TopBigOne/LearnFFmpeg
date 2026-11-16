@@ -27,7 +27,7 @@
  *
  * 输出：后台线程从编码器取出码流（Annex B 格式），通过回调交给封装模块。
  * 工程 minSdk 是 23，API 26/28 才有的函数直接调用：CMake 打开 __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__，
- * 这些符号按弱引用链接（老系统上能正常加载 so），调用处用 __builtin_available 做运行时版本判断。
+ * 这些符号按弱引用链接（老系统上能正常加载 so），调用处用 DEVICE_API_AT_LEAST（util/ApiLevel.h）做运行时版本判断。
  * Open 返回 false 时（系统版本不够、没有硬件编码器、配置失败等）调用方应回退到软件编码。
  */
 class HwVideoEncoder {

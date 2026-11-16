@@ -4,6 +4,7 @@
 
 #include "codec/HwVideoEncoder.h"
 #include "common/RecorderClock.h"
+#include <ApiLevel.h>
 #include <LogUtil.h>
 #include <cstring>
 #include <libyuv.h>
@@ -49,7 +50,7 @@ HwVideoEncoder::~HwVideoEncoder() {
 }
 
 bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, int fps) {
-    if (mode == InputMode::Surface && !__builtin_available(android 26, *)) {
+    if (mode == InputMode::Surface && !DEVICE_API_AT_LEAST(26)) {
         LOGCATE("HwVideoEncoder::Open Surface input requires Android 8.0+, fall back to software");
         return false;
     }
@@ -70,9 +71,9 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
     if (!configured) return false;
 
     if (mode == InputMode::Surface) {
-        // 上面已确认 API 26+；__builtin_available 不能跨语句传递，这里再守卫一次（编译期要求，运行时开销可忽略）
+        // 上面已确认 API 26+，但版本判断只对所在的 if 块生效，这里调用前要再判断一次（编译期要求，运行时开销可忽略）
         media_status_t status = AMEDIA_ERROR_UNSUPPORTED;
-        if (__builtin_available(android 26, *)) {
+        if (DEVICE_API_AT_LEAST(26)) {
             status = AMediaCodec_createInputSurface(m_Codec, &m_InputWindow);
         }
         if (status != AMEDIA_OK || m_InputWindow == nullptr) {
@@ -93,7 +94,7 @@ bool HwVideoEncoder::Open(InputMode mode, int width, int height, int bitRate, in
         // 输入缓冲的行宽、Y 平面行数：编码器可能要求对齐（例如 16 或 64），以编码器给出的为准
         m_Stride = width;
         m_SliceHeight = height;
-        if (__builtin_available(android 28, *)) {
+        if (DEVICE_API_AT_LEAST(28)) {
             AMediaFormat *inputFormat = AMediaCodec_getInputFormat(m_Codec);
             if (inputFormat != nullptr) {
                 int32_t stride = 0, sliceHeight = 0;
@@ -118,7 +119,7 @@ bool HwVideoEncoder::Configure(int width, int height, int bitRate, int fps, int3
     }
 
     m_Name.clear();
-    if (__builtin_available(android 28, *)) {
+    if (DEVICE_API_AT_LEAST(28)) {
         char *name = nullptr;
         if (AMediaCodec_getName(m_Codec, &name) == AMEDIA_OK && name != nullptr) {
             m_Name = name;
@@ -214,7 +215,7 @@ bool HwVideoEncoder::EncodeImage(const NativeImage &image, int64_t ptsUs) {
 void HwVideoEncoder::SignalEndOfStream() {
     if (m_Mode == InputMode::Surface) {
         media_status_t status = AMEDIA_ERROR_UNSUPPORTED;
-        if (__builtin_available(android 26, *)) {   // Surface 模式只在 API 26+ 打开成功，这里恒为真
+        if (DEVICE_API_AT_LEAST(26)) {   // Surface 模式只在 API 26+ 打开成功，这里恒为真
             status = AMediaCodec_signalEndOfInputStream(m_Codec);
         }
         if (status != AMEDIA_OK) {

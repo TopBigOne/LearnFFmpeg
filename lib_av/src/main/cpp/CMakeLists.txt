@@ -106,7 +106,7 @@ add_library( # Sets the name of the library.
 #        ${jnilibs}/${ANDROID_ABI}/libavformat.so)
 
 # 使用高于 minSdk 的 NDK API（如 API 26/28 的 AMediaCodec_createInputSurface / AMediaCodec_getName）：
-# 这些符号按弱引用链接，so 在老系统上照常加载；调用处必须用 __builtin_available(android N, *) 守卫，
+# 这些符号按弱引用链接，so 在老系统上照常加载；调用处必须用 DEVICE_API_AT_LEAST(N)（util/ApiLevel.h）守卫，
 # 漏写守卫直接编译报错。等价于 NDK 的 ANDROID_WEAK_API_DEFS，只作用于本库，不影响 oboe / libyuv。
 # 参考 https://developer.android.com/ndk/guides/using-newer-apis
 target_compile_definitions(${libname} PRIVATE __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__)
