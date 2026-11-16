@@ -55,8 +55,8 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.byteflow.learnffmpeg.camera.Camera2FrameCallback;
 import com.byteflow.learnffmpeg.camera.Camera2Wrapper;
 import com.byteflow.learnffmpeg.camera.CameraUtil;
-import com.byteflow.learnffmpeg.media.AudioRecorder;
-import com.byteflow.learnffmpeg.media.FFMediaRecorder;
+import com.monday.av.media.AudioRecorder;
+import com.monday.av.media.FFMediaRecorder;
 import com.byteflow.learnffmpeg.view.CaptureLayout;
 import com.byteflow.learnffmpeg.view.CaptureListener;
 import com.byteflow.learnffmpeg.view.MyGestureListener;
@@ -72,10 +72,10 @@ import java.util.GregorianCalendar;
 import java.util.List;
 import java.util.Locale;
 
-import static com.byteflow.learnffmpeg.media.MediaRecorderContext.IMAGE_FORMAT_I420;
-import static com.byteflow.learnffmpeg.media.MediaRecorderContext.IMAGE_FORMAT_RGBA;
-import static com.byteflow.learnffmpeg.media.MediaRecorderContext.RECORDER_TYPE_AV;
-import static com.byteflow.learnffmpeg.media.MediaRecorderContext.RECORDER_TYPE_SINGLE_VIDEO;
+import static com.monday.av.media.MediaRecorderContext.IMAGE_FORMAT_I420;
+import static com.monday.av.media.MediaRecorderContext.IMAGE_FORMAT_RGBA;
+import static com.monday.av.media.MediaRecorderContext.RECORDER_TYPE_AV;
+import static com.monday.av.media.MediaRecorderContext.RECORDER_TYPE_SINGLE_VIDEO;
 import static com.byteflow.learnffmpeg.view.RecordedButton.BUTTON_STATE_ONLY_RECORDER;
 
 

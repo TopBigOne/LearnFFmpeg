@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "LearnFFmpeg"
 include(":app")
+include(":lib_av")

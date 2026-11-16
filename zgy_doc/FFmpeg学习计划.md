@@ -101,7 +101,7 @@
 #### 学习资源
 - [FFmpeg 官方文档](https://ffmpeg.org/documentation.html)
 - [雷霄骅博客](https://blog.csdn.net/leixiaohua1020)
-- 项目参考：`app/src/main/cpp/CMakeLists.txt`
+- 项目参考：`lib_av/src/main/cpp/CMakeLists.txt`
 
 #### 评估标准
 - [ ] 能解释 YUV420P 的数据结构
@@ -156,9 +156,9 @@
   - 添加播放控制：播放、暂停、停止、seek
 
 - [ ] 参考代码
-  - `app/src/main/cpp/player/render/video/NativeRender.cpp`
-  - `app/src/main/cpp/player/decoder/Decoder.cpp`（send/receive 状态机）
-  - `app/src/main/cpp/player/demux/Demuxer.cpp`（读包线程、seek）
+  - `lib_av/src/main/cpp/player/render/video/NativeRender.cpp`
+  - `lib_av/src/main/cpp/player/decoder/Decoder.cpp`（send/receive 状态机）
+  - `lib_av/src/main/cpp/player/demux/Demuxer.cpp`（读包线程、seek）
 
 **作业**
 - [ ] 实现一个简单的视频播放器，能播放本地 MP4 文件
@@ -200,8 +200,8 @@
   - 集成音频播放到播放器
 
 - [ ] 参考代码
-  - `app/src/main/cpp/player/decoder/AudioDecoder.cpp`
-  - `app/src/main/cpp/player/output/AudioPlayback.cpp`、`output/OpenSLAudioOutput.cpp`
+  - `lib_av/src/main/cpp/player/decoder/AudioDecoder.cpp`
+  - `lib_av/src/main/cpp/player/output/AudioPlayback.cpp`、`output/OpenSLAudioOutput.cpp`
 
 **作业**
 - [ ] 实现音频播放器，播放 MP3/AAC 文件
@@ -255,8 +255,8 @@
   - 添加延时补偿机制
 
 - [ ] 参考代码
-  - `app/src/main/cpp/player/output/VideoOutput.cpp`（RefreshLocked / ComputeTargetDelay）
-  - `app/src/main/cpp/player/core/Clock.cpp`
+  - `lib_av/src/main/cpp/player/output/VideoOutput.cpp`（RefreshLocked / ComputeTargetDelay）
+  - `lib_av/src/main/cpp/player/core/Clock.cpp`
 
 **作业**
 - [ ] 完善播放器，实现音视频同步
@@ -329,7 +329,7 @@
   ```
 
 - [ ] 参考代码
-  - `app/src/main/cpp/player/render/video/VideoGLRender.cpp`
+  - `lib_av/src/main/cpp/player/render/video/VideoGLRender.cpp`
 
 **作业**
 - [ ] 实现 OpenGL 视频渲染器
@@ -431,7 +431,7 @@
 - [ ] 优化渲染性能
 
 **参考代码**
-- `app/src/main/cpp/player/render/video/VRGLRender.cpp`
+- `lib_av/src/main/cpp/player/render/video/VRGLRender.cpp`
 
 ---
 
@@ -488,7 +488,7 @@
   ```
 
 **参考代码**
-- `app/src/main/cpp/recorder/MediaRecorder.cpp`
+- `lib_av/src/main/cpp/recorder/MediaRecorder.cpp`
 
 **作业**
 - [ ] 实现视频录制功能
@@ -529,7 +529,7 @@
   - 集成到录制模块
 
 **参考代码**
-- `app/src/main/cpp/recorder/SingleAudioRecorder.cpp`
+- `lib_av/src/main/cpp/recorder/SingleAudioRecorder.cpp`
 
 #### 第12周：音视频合成
 
@@ -563,7 +563,7 @@
 - [ ] 实现边录边存功能
 
 **参考代码**
-- `app/src/main/cpp/recorder/MediaRecorderContext.cpp`
+- `lib_av/src/main/cpp/recorder/MediaRecorderContext.cpp`
 
 #### 第13周：录制功能完善
 
@@ -617,7 +617,7 @@
   - 性能对比测试
 
 **参考代码**
-- `app/src/main/cpp/player/HWCodecPlayer.cpp`
+- `lib_av/src/main/cpp/player/HWCodecPlayer.cpp`
 
 **作业**
 - [ ] 实现软硬解自动切换
@@ -641,7 +641,7 @@
 - [ ] 优化渲染性能
 
 **参考代码**
-- `app/src/main/cpp/player/render/audio/AudioGLRender.cpp`
+- `lib_av/src/main/cpp/player/render/audio/AudioGLRender.cpp`
 
 #### 第16周：流媒体播放
 

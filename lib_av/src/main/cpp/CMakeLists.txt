@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.4.1)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++17")
 
-set(jnilibs ${CMAKE_SOURCE_DIR}/../jniLibs)
+set(jnilibs ${CMAKE_SOURCE_DIR}/prebuilt)   # FFmpeg / x264 / fdk-aac 预编译静态库，按 ABI 分目录
 set(libname learn-ffmpeg)
 
 include_directories(
@@ -132,3 +132,6 @@ target_link_libraries( # Specifies the target library.
                        ${third-party-libs}
                        ${native-libs}
                        )
+# 预编译 FFmpeg 的 aarch64 汇编以非 PIC 方式寻址全局符号（如 ff_vp9_subpel_filters），
+# NDK r22+ 默认的 lld 会拒绝链接；-Bsymbolic 让这些符号在本库内直接绑定，所有代码都静态链接进这一个 .so，没有副作用
+target_link_options(${libname} PRIVATE "-Wl,-Bsymbolic")

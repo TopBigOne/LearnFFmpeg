@@ -25,19 +25,19 @@ import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
-import com.byteflow.learnffmpeg.media.FFMediaPlayer;
-import com.byteflow.learnffmpeg.media.MySurfaceView;
+import com.monday.av.media.FFMediaPlayer;
+import com.monday.av.media.MySurfaceView;
 import com.byteflow.learnffmpeg.util.CommonUtils;
 
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_DONE;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_INIT_ERROR;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_READY;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODING_TIME;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_REQUEST_RENDER;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.VIDEO_RENDER_ANWINDOW;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_DONE;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_INIT_ERROR;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_READY;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODING_TIME;
+import static com.monday.av.media.FFMediaPlayer.MSG_REQUEST_RENDER;
+import static com.monday.av.media.FFMediaPlayer.VIDEO_RENDER_ANWINDOW;
 
 public class NativeMediaPlayerActivity extends AppCompatActivity implements SurfaceHolder.Callback, FFMediaPlayer.EventCallback{
     private static final String TAG = "MediaPlayerActivity";

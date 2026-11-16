@@ -28,7 +28,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.byteflow.learnffmpeg.adapter.MyRecyclerViewAdapter;
-import com.byteflow.learnffmpeg.media.FFMediaPlayer;
+import com.monday.av.media.FFMediaPlayer;
 import com.byteflow.learnffmpeg.util.CommonUtils;
 
 import java.util.Arrays;

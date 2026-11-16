@@ -14,7 +14,7 @@
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1">
-            <com.byteflow.learnffmpeg.media.MyGLSurfaceView
+            <com.monday.av.media.MyGLSurfaceView
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_centerInParent="true"
@@ -24,7 +24,7 @@
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1">
-            <com.byteflow.learnffmpeg.media.MyGLSurfaceView
+            <com.monday.av.media.MyGLSurfaceView
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_centerInParent="true"

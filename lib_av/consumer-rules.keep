@@ -1,0 +1,16 @@
+# lib_av 的混淆规则，会随库一起传给依赖它的模块（app）。
+
+# JNI 函数名由"包名 + 类名 + 方法名"拼成，native 方法和所在类都不能改名
+-keepclasseswithmembernames,includedescriptorclasses class com.monday.av.media.** {
+    native <methods>;
+}
+
+# native 层通过 GetMethodID / GetFieldID 按名字访问的成员
+-keepclassmembers class com.monday.av.media.FFMediaPlayer {
+    void playerEventCallback(int, float);
+    void createTrack(int, int);
+    void playTrack(byte[], int);
+}
+-keepclassmembers class com.monday.av.media.MediaRecorderContext {
+    long mNativeContextHandle;
+}

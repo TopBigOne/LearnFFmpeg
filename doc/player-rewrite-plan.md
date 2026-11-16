@@ -1,6 +1,6 @@
 # 播放器内核重写计划
 
-目标：把 `app/src/main/cpp/player` 从"能跑的演示"改造成接近上线水准的播放器内核。
+目标：把 `lib_av/src/main/cpp/player` 从"能跑的演示"改造成接近上线水准的播放器内核。
 基线：原作者提交 `e8f24c9`。参照实现：ffplay.c（主）、ijkplayer `ff_ffplay.c`、Media3 ExoPlayer。
 
 每个阶段都要能独立编译、能播放，再进入下一阶段。勾选框用来记录进度。

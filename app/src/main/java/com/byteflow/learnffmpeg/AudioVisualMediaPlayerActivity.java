@@ -22,23 +22,23 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
-import com.byteflow.learnffmpeg.media.FFMediaPlayer;
-import com.byteflow.learnffmpeg.media.MyGLSurfaceView;
+import com.monday.av.media.FFMediaPlayer;
+import com.monday.av.media.MyGLSurfaceView;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.AUDIO_GL_RENDER;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_DONE;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_INIT_ERROR;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODER_READY;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_DECODING_TIME;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.MSG_REQUEST_RENDER;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.VIDEO_GL_RENDER;
-import static com.byteflow.learnffmpeg.media.FFMediaPlayer.VIDEO_RENDER_OPENGL;
+import static com.monday.av.media.FFMediaPlayer.AUDIO_GL_RENDER;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_DURATION;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_HEIGHT;
+import static com.monday.av.media.FFMediaPlayer.MEDIA_PARAM_VIDEO_WIDTH;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_DONE;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_INIT_ERROR;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODER_READY;
+import static com.monday.av.media.FFMediaPlayer.MSG_DECODING_TIME;
+import static com.monday.av.media.FFMediaPlayer.MSG_REQUEST_RENDER;
+import static com.monday.av.media.FFMediaPlayer.VIDEO_GL_RENDER;
+import static com.monday.av.media.FFMediaPlayer.VIDEO_RENDER_OPENGL;
 
 public class AudioVisualMediaPlayerActivity extends AppCompatActivity implements GLSurfaceView.Renderer, FFMediaPlayer.EventCallback{
     private static final String TAG = "MediaPlayerActivity";

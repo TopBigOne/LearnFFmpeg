@@ -1,4 +1,4 @@
-package com.byteflow.learnffmpeg.media;
+package com.monday.av.media;
 
 import android.content.res.Resources;
 import android.graphics.Bitmap;
