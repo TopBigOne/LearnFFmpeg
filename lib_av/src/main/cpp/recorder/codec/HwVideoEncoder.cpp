@@ -14,6 +14,9 @@
 namespace {
 
 const char *kMimeAvc = "video/avc";
+// COLOR_FormatSurface indicates that the data will be a GraphicBuffer metadata reference.
+// Note: in OMX this is called OMX_COLOR_FormatAndroidOpaque.
+// 0x7F000789 只表示“输入走 Surface”
 const int32_t kColorFormatSurface = 0x7F000789;          // COLOR_FormatSurface
 const int32_t kColorFormatYUV420Planar = 19;             // COLOR_FormatYUV420Planar（I420）
 const int32_t kColorFormatYUV420SemiPlanar = 21;         // COLOR_FormatYUV420SemiPlanar（NV12）
