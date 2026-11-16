@@ -10,8 +10,8 @@
 #define LEARNFFMPEG_MASTER_GLCAMERARENDER_H
 #include <thread>
 #include <ImageDef.h>
-#include "YuvConvert.h"
-#include "VideoEncoderSink.h"
+#include "codec/YuvConvert.h"
+#include "codec/VideoEncoderSink.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <android/native_window.h>

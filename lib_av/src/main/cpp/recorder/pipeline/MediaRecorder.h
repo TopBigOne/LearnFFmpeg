@@ -18,11 +18,11 @@
 #include <ImageDef.h>
 #include <render/audio/AudioRender.h>
 #include "ThreadSafeQueue.h"
-#include "RecorderClock.h"
-#include "AudioChunk.h"
-#include "YuvConvert.h"
-#include "HwVideoEncoder.h"
-#include "VideoEncoderSink.h"
+#include "common/RecorderClock.h"
+#include "common/AudioChunk.h"
+#include "codec/YuvConvert.h"
+#include "codec/HwVideoEncoder.h"
+#include "codec/VideoEncoderSink.h"
 #include <deque>
 #include <memory>
 #include <thread>

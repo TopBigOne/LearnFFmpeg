@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <LogUtil.h>
-#include <SingleVideoRecorder.h>
+#include "pipeline/SingleVideoRecorder.h"
 
 extern "C" {
 #include <libavutil/imgutils.h>

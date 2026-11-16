@@ -18,10 +18,10 @@ extern "C" {
 }
 
 #include "ThreadSafeQueue.h"
-#include "RecorderClock.h"
-#include "YuvConvert.h"
-#include "HwVideoEncoder.h"
-#include "VideoEncoderSink.h"
+#include "common/RecorderClock.h"
+#include "codec/YuvConvert.h"
+#include "codec/HwVideoEncoder.h"
+#include "codec/VideoEncoderSink.h"
 #include "ImageDef.h"
 #include <thread>
 #include <atomic>

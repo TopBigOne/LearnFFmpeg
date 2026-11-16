@@ -13,11 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <jni.h>
-#include <SingleVideoRecorder.h>
+#include "pipeline/SingleVideoRecorder.h"
 #include "VideoGLRender.h"
-#include "GLCameraRender.h"
-#include "SingleAudioRecorder.h"
-#include "MediaRecorder.h"
+#include "camera/GLCameraRender.h"
+#include "pipeline/SingleAudioRecorder.h"
+#include "pipeline/MediaRecorder.h"
 
 #define RECORDER_TYPE_SINGLE_VIDEO  0 // 仅录制视频
 #define RECORDER_TYPE_SINGLE_AUDIO  1 // 仅录制音频

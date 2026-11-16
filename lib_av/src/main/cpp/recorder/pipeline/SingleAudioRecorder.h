@@ -22,7 +22,7 @@ extern "C" {
 }
 
 #include "ThreadSafeQueue.h"
-#include "AudioChunk.h"
+#include "common/AudioChunk.h"
 #include <vector>
 #include <thread>
 #include <atomic>

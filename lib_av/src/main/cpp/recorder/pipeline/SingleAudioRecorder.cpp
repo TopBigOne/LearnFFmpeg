@@ -8,7 +8,7 @@
 
 
 #include <unistd.h>
-#include "SingleAudioRecorder.h"
+#include "pipeline/SingleAudioRecorder.h"
 
 /**
  * @brief 构造函数

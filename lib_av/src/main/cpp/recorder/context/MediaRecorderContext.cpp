@@ -9,7 +9,7 @@
 #include <LogUtil.h>
 #include <ImageDef.h>
 #include <cstdio>
-#include "MediaRecorderContext.h"
+#include "context/MediaRecorderContext.h"
 
 jfieldID MediaRecorderContext::s_ContextHandle = 0L;
 

@@ -34,13 +34,13 @@ file(GLOB src-files
         ${CMAKE_SOURCE_DIR}/player/decoder/*.cpp
         ${CMAKE_SOURCE_DIR}/player/render/video/*.cpp
         ${CMAKE_SOURCE_DIR}/player/render/audio/*.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/SingleVideoRecorder.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/SingleAudioRecorder.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/MediaRecorderContext.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/GLCameraRender.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/MediaRecorder.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/YuvConvert.cpp
-        ${CMAKE_SOURCE_DIR}/recorder/HwVideoEncoder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/context/MediaRecorderContext.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/pipeline/MediaRecorder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/pipeline/SingleVideoRecorder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/pipeline/SingleAudioRecorder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/camera/GLCameraRender.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/codec/HwVideoEncoder.cpp
+        ${CMAKE_SOURCE_DIR}/recorder/codec/YuvConvert.cpp
         ${CMAKE_SOURCE_DIR}/thirdparty/sonic/sonic.c
         )
 

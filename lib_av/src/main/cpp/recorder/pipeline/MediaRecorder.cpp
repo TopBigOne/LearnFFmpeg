@@ -6,8 +6,8 @@
  *
  * */
 
-#include "MediaRecorder.h"
-#include "RecorderMuxer.h"
+#include "pipeline/MediaRecorder.h"
+#include "common/RecorderMuxer.h"
 
 // 编码线程等待新数据的超时时间：超时只是为了定期检查退出标志，有数据或停止时会被立即唤醒
 #define QUEUE_WAIT_TIMEOUT_MS 50

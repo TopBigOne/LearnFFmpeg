@@ -2,7 +2,7 @@
  * 录制模块的图像格式转换，统一由 libyuv 完成
  */
 
-#include "YuvConvert.h"
+#include "codec/YuvConvert.h"
 #include <LogUtil.h>
 #include <libyuv.h>
 

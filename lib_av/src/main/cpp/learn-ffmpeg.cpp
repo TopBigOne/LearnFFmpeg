@@ -12,7 +12,7 @@
 #include <render/video/VideoGLRender.h>
 #include <render/video/VRGLRender.h>
 #include <render/audio/AudioGLRender.h>
-#include <MediaRecorderContext.h>
+#include "context/MediaRecorderContext.h"
 #include "util/LogUtil.h"
 #include "jni.h"
 #include "ASanTestCase.h"

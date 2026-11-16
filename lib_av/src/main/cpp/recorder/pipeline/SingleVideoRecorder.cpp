@@ -7,8 +7,8 @@
  * */
 
 
-#include "SingleVideoRecorder.h"
-#include "RecorderMuxer.h"
+#include "pipeline/SingleVideoRecorder.h"
+#include "common/RecorderMuxer.h"
 
 extern "C" {
 #include <libavutil/opt.h>

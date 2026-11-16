@@ -17,7 +17,7 @@
 #include <vec2.hpp>
 #include <vector>
 #include <render/BaseGLRender.h>
-#include <SingleVideoRecorder.h>
+#include "pipeline/SingleVideoRecorder.h"
 
 using namespace glm;
 using namespace std;

@@ -14,7 +14,7 @@
 #include <media/NdkMediaCodec.h>
 #include <android/native_window.h>
 #include <ImageDef.h>
-#include "YuvConvert.h"
+#include "codec/YuvConvert.h"
 
 /**
  * H.264 硬件编码器，两种输入方式：

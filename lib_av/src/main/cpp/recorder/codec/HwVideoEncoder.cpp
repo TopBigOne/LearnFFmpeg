@@ -2,8 +2,8 @@
  * 基于 MediaCodec（NDK AMediaCodec）的 H.264 硬件编码器
  */
 
-#include "HwVideoEncoder.h"
-#include "RecorderClock.h"
+#include "codec/HwVideoEncoder.h"
+#include "common/RecorderClock.h"
 #include <LogUtil.h>
 #include <dlfcn.h>
 #include <cstring>
