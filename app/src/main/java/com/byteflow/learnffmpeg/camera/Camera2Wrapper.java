@@ -68,6 +68,9 @@ public class Camera2Wrapper {
     private Handler mBackgroundHandler;
     private HandlerThread mBackgroundThread;
 
+    /** 预览帧转换器：复用输出数组，避免每帧分配上 MB 的 byte[]。只在 mBackgroundHandler 线程使用 */
+    private final CameraUtil.I420Converter mPreviewConverter = new CameraUtil.I420Converter();
+
     /** 传感器时间戳是否已是 elapsedRealtimeNanos 时基（SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME） */
     private volatile boolean mSensorTimestampRealtime = false;
     /** 时基完全未知时，用第一帧的到达时间锚定得到的偏移；Long.MIN_VALUE 表示尚未锚定 */
@@ -82,7 +85,8 @@ public class Camera2Wrapper {
             if (image != null) {
                 if (mCamera2FrameCallback != null) {
                     long timestampNs = toElapsedRealtimeNanos(image.getTimestamp());
-                    mCamera2FrameCallback.onPreviewFrame(CameraUtil.YUV_420_888_data(image), image.getWidth(), image.getHeight(), timestampNs);
+                    // 数组每帧复用，回调方不能在回调返回后继续持有（见 Camera2FrameCallback）
+                    mCamera2FrameCallback.onPreviewFrame(mPreviewConverter.convert(image), image.getWidth(), image.getHeight(), timestampNs);
                 }
                 image.close();
             }

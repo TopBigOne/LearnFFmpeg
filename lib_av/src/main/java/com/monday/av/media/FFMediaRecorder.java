@@ -126,7 +126,7 @@ public class FFMediaRecorder extends MediaRecorderContext implements GLSurfaceVi
 
     @Override
     public void onDrawFrame(GL10 gl) {
-        Log.d(TAG, "onDrawFrame() called with: gl = [" + gl + "]");
+        // 每帧调用，不打日志：字符串拼接 + logcat 写入每秒几十次，徒增 GC 和 CPU 开销
         native_OnDrawFrame();
     }
 

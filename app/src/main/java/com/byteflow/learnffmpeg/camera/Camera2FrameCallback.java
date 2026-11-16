@@ -2,6 +2,10 @@ package com.byteflow.learnffmpeg.camera;
 
 public interface Camera2FrameCallback {
     /**
+     * 预览帧回调（相机后台线程）。
+     *
+     * @param data        I420 数据。数组会被下一帧复用，只在本次回调期间有效；
+     *                    需要在回调返回后继续使用（例如交给其他线程）请自行拷贝
      * @param timestampNs 画面的采集时刻，已换算到 SystemClock.elapsedRealtimeNanos() 时基，
      *                    可以直接和音频采集时刻比较（用于录制时的音视频同步）
      */
